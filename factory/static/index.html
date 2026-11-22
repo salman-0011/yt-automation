@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YT Production Factory — Dashboard</title>
+<style>
+  *{box-sizing:border-box} body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0}
+  header{background:#1e293b;padding:16px 20px} header h1{margin:0;font-size:22px} header p{margin:4px 0 0;color:#94a3b8}
+  main{max-width:1100px;margin:0 auto;padding:20px}
+  section{background:#1e293b;border-radius:12px;padding:16px;margin-bottom:16px}
+  h2{margin:0 0 12px;font-size:18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .stat{background:#0f172a;border-radius:10px;padding:12px}.stat b{font-size:24px;display:block}.stat span{color:#94a3b8;font-size:13px}
+  table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:8px;border-bottom:1px solid #334155;font-size:14px}
+  button{background:#0ea5e9;color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer;font-size:14px}
+  button:hover{background:#0284c7} input,select{padding:9px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;width:100%}
+  .form{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px;align-items:end}
+  .card{background:#0f172a;border-radius:10px;padding:12px;margin-bottom:8px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#334155}
+  .badge.ok{background:#166534}.badge.warn{background:#92400e}.badge.manual{background:#1e40af}
+  .muted{color:#94a3b8;font-size:13px} a{color:#38bdf8}
+  @media(max-width:700px){.form{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 YT Production Factory</h1>
+  <p>Origin Loop — Shorts only &nbsp;•&nbsp; Tiny Timeline Lab — Long-form 8–10 min &nbsp;•&nbsp; CPU-first, Omni Flash only, Charon voice</p>
+</header>
+<main>
+  <section>
+    <h2>New job</h2>
+    <div class="form">
+      <label>Topic <input id="topic" placeholder="e.g. How 70 warships sailed over dry land"></label>
+      <label>Type <select id="kind"><option value="short">Short (Origin Loop)</option><option value="long">Long-form (Tiny Timeline Lab)</option></select></label>
+      <label>Channel <input id="channel" value="auto from type" disabled></label>
+      <button onclick="createJob()">Create job</button>
+    </div>
+    <p class="muted" id="newmsg">Creates jobs/&lt;slug&gt;/ with demand-check, master prompt, script + storyboard templates, Flow prompts and the pre-publish checklist. No video is generated automatically — Flow / Nano Banana have no public API.</p>
+  </section>
+
+  <section>
+    <h2>Stats <span class="muted" id="updated"></span></h2>
+    <div class="grid" id="stats"></div>
+    <p class="muted" id="credits"></p>
+  </section>
+
+  <section>
+    <h2>Jobs <span class="muted">(auto-refreshes every 3 seconds — polling /api/jobs)</span></h2>
+    <div id="jobs"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2>Job detail</h2>
+    <div id="detail"><p class="muted">Click a job above to see its step-by-step files, clips and credits.</p></div>
+  </section>
+
+  <section>
+    <h2>Tools</h2>
+    <p class="muted">Status is checked live from the backend. “Manual” means no public API exists — the app prepares prompts, you open the tool. Nothing here fakes an API call.</p>
+    <div id="tools"><p class="muted">Loading…</p></div>
+  </section>
+</main>
+<script>
+async function j(u, o){ const r = await fetch(u, o); return r.json(); }
+function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function createJob(){
+  const topic = document.getElementById('topic').value.trim();
+  const kind = document.getElementById('kind').value;
+  if(!topic){ document.getElementById('newmsg').textContent = 'Please type a topic first.'; return; }
+  const res = await j('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({topic, kind})});
+  if(res.error){ document.getElementById('newmsg').textContent = 'Error: ' + res.error; return; }
+  document.getElementById('newmsg').textContent = 'Created: ' + res.job.slug + ' in ' + res.path;
+  document.getElementById('topic').value = '';
+  refresh();
+}
+
+async function showJob(slug){
+  const job = await j('/api/jobs/' + encodeURIComponent(slug));
+  if(job.error){ document.getElementById('detail').textContent = job.error; return; }
+  const steps = ['01-demand-check','02-research','03-script','04-storyboard','05-voice','06-visuals','07-captions','08-assemble','09-qc-pre-publish-gate'];
+  document.getElementById('detail').innerHTML =
+    '<div class="card"><b>' + esc(job.topic) + '</b> <span class="badge">' + esc(job.kind) + '</span> ' +
+    '<span class="badge">' + esc(job.channel) + '</span><br><span class="muted">slug: ' + esc(job.slug) +
+    ' • status: ' + esc(job.status) + ' • verdict: ' + esc(job.verdict) +
+    ' • clips: ' + (job.clips||0) + ' • output video: ' + (job.has_output ? 'yes' : 'not yet') + '</span>' +
+    '<p><b>Pipeline steps</b></p><ol>' + steps.map(s => '<li>' + s + '</li>').join('') + '</ol>' +
+    '<p><b>Files produced (' + (job.file_count||0) + ')</b></p><p class="muted">' +
+    (job.files||[]).map(esc).join('<br>') + '</p>' +
+    '<p><b>Credits for this job</b>: ' + (job.kind === 'short' ? '~120 Omni Flash credits (40s × 3/sec)' : '~450 primary + 144 retake reserve = 594 max') + '</p></div>';
+}
+
+async function refresh(){
+  try{
+    const [jobsRes, cred, toolsRes] = await Promise.all([j('/api/jobs'), j('/api/credits'), j('/api/tools')]);
+    const jobs = jobsRes.jobs || [];
+    const done = jobs.filter(x => x.has_output).length;
+    const stats = [
+      ['Total jobs', jobs.length], ['Videos produced', done],
+      ['Shorts', jobs.filter(x => x.kind === 'short').length],
+      ['Long-form', jobs.filter(x => x.kind === 'long').length],
+      ['Credits left (total)', cred.total ?? '—'],
+      ['Account A left', (cred.balances||{}).A ?? '—'],
+      ['Account B left', (cred.balances||{}).B ?? '—'],
+    ];
+    document.getElementById('stats').innerHTML = stats.map(([k,v]) => '<div class="stat"><b>' + v + '</b><span>' + k + '</span></div>').join('');
+    document.getElementById('credits').textContent =
+      'One 40s Short ≈ ' + (cred.short_estimate||120) + ' credits. One 9-min long-form ≈ ' +
+      (cred.long_estimate ? cred.long_estimate.primary + ' primary + ' + cred.long_estimate.retake_reserve + ' reserve = ' + cred.long_estimate.max + ' max' : '594 max') +
+      '. Each account: 1000 starting + 50/day.';
+    document.getElementById('updated').textContent = '— updated ' + new Date().toLocaleTimeString();
+    document.getElementById('jobs').innerHTML = jobs.length ? '<table><tr><th>Topic</th><th>Type</th><th>Channel</th><th>Status</th><th>Clips</th><th>Output</th><th></th></tr>' +
+      jobs.map(x => '<tr><td>' + esc(x.topic) + '</td><td>' + esc(x.kind) + '</td><td>' + esc(x.channel) + '</td><td>' + esc(x.status) + '</td><td>' + (x.clips||0) + '</td><td>' + (x.has_output ? 'yes' : 'no') + '</td><td><button onclick="showJob(\'' + esc(x.slug) + '\')">Detail</button></td></tr>').join('') + '</table>'
+      : '<p class="muted">No jobs yet — create one above.</p>';
+    document.getElementById('tools').innerHTML = (toolsRes.tools||[]).map(t => {
+      const cls = t.status === 'installed' || t.status === 'configured' ? 'ok' : (t.status === 'manual' ? 'manual' : 'warn');
+      return '<div class="card"><b>' + esc(t.name) + '</b> <span class="badge ' + cls + '">' + esc(t.status) + '</span><br><span class="muted">' + esc(t.note) + '</span></div>';
+    }).join('');
+  }catch(e){ document.getElementById('jobs').innerHTML = '<p class="muted">Backend not reachable: ' + esc(e.message) + '</p>'; }
+}
+document.getElementById('kind').addEventListener('change', e => {
+  document.getElementById('channel').value = e.target.value === 'short' ? 'Origin Loop' : 'Tiny Timeline Lab';
+});
+document.getElementById('channel').value = 'Origin Loop';
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

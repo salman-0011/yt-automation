@@ -1,0 +1,4 @@
+# Paste ONE prompt per scene into Google Flow (Omni Flash, 720p).
+# Check the Flow cost screen before generating. One generation per scene.
+# Save clips as clips/scene-01.mp4, scene-02.mp4, ...
+# Scene prompts go here — write them from the storyboard (step 04).

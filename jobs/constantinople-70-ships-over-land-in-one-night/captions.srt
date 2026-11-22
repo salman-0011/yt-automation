@@ -1,0 +1,20 @@
+NOTE: estimated timings from script word count. Replace with faster-whisper output after voice render.
+
+1
+00:00:00,000 --> 00:00:11,842
+# Script — Constantinople: 70 ships over land in one night
+
+Channel: Tiny Timeline Lab (long)
+
+Status: DRAFT — write the script here using prompts/master-prompt.md
+and the 5 storytelling rules.
+
+2
+00:00:12,042 --> 00:00:15,595
+Word target: 1150-1350 words (long-form, 8-10 min, 5 acts).
+
+3
+00:00:15,795 --> 00:00:18,953
+## Clean script (copy-ready)
+
+[Write the narration here]

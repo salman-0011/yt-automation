@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/credits.json
+jobs/*/clips/
+jobs/*/output-*.mp4
+jobs/*/voice/*.mp3
+*.mp4
+*.mp3
+.DS_Store

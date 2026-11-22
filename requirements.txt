@@ -1,0 +1,11 @@
+# Core (required) — stdlib only for the CLI + dashboard fallback.
+# FastAPI/uvicorn are optional: without them the dashboard still runs
+# on the Python stdlib server (same /api/* routes, same pages).
+fastapi>=0.110
+uvicorn>=0.29
+python-dotenv>=1.0
+
+# Optional — install only what you use. All are guarded in code:
+# faster-whisper (local CPU captions): pip install faster-whisper
+# google-genai (Gemini TTS / Charon via API): pip install google-genai
+# manim (mechanism animation, 720p): pip install manim
