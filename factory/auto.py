@@ -40,7 +40,10 @@ Steps, in order:
   1. plan_angle — Muse picks ONE angle first (demand PROCEED/REFRAME/DROP)
   2. write_script — from job script.md, or Muse via the Gen AI SDK (never generic)
   3. make_voice  — audio backends: gemini-tts (Charon) -> kokoro -> piper -> existing
-  4. make_visuals — video backends: motion-canvas -> manim -> code (Pillow+FFmpeg)
+  4. make_visuals — video backends: stills (default: one real Nano Banana
+                 still per scene + FFmpeg Ken Burns) -> motion-canvas ->
+                 manim. NO text-card fallback anywhere: a missing still
+                 stops the job with the exact filename + prompt.
                  flow-manual is NOT a render backend (no public API)
   5. make_captions — faster-whisper CPU if installed, else SRT from script timing
   6. assemble_video — FFmpeg (default) or MoviePy, Quick Sync if it really
@@ -65,6 +68,7 @@ from .genai_client import sdk_ready
 from .library import publish as publish_to_library
 from .options import JobOptions
 from .qc import run_qc
+from .stills import write_stills_guide
 from .supervisor import (plan_angle_step, save_agent_angle, save_agent_script,
                          supervisor_label, write_script_step)
 from .video import assemble_auto, pick_encoder
@@ -293,6 +297,14 @@ class _Runner:
             self.script, self.script_source, self.scenes = script, source, scenes
         self.log(f"Script: {self.script_source}; {len(self.script.split())} words; "
                  f"{len(self.scenes)} scenes")
+        try:
+            _guide, _check = write_stills_guide(
+                self.job_dir, self.scenes, options, self.angle)
+            self.log(f"Stills guide: {_guide.name} — "
+                     f"{_check['present_count']}/{_check['expected']} stills present; "
+                     f"missing stills stop the visuals step, they are never faked.")
+        except Exception as e:  # noqa: BLE001 - guide is advisory; visuals step enforces it
+            self.log(f"Stills guide could not be written: {e}")
         self.checkpoint("plan", 10, "scripting", "plan done")
         return {"script": self.script, "scenes": len(self.scenes),
                 "source": self.script_source}
@@ -322,15 +334,22 @@ class _Runner:
         options = self.options
         expected = len(self.scenes)
         existing_clips = sorted((self.job_dir / "clips").glob("auto-scene-*.mp4"))
+        # Resume only if the clips really came from real stills. Old
+        # runs (v2.2 "code" backend) produced coloured text cards —
+        # those clips must NEVER be reused as visuals.
+        from .stills import check_stills
+        _stills_ok = not check_stills(self.job_dir, self.scenes, options,
+                                      self.angle)["missing"]
         if ("visuals" in self.completed and len(existing_clips) >= expected
-                and all(c.stat().st_size > 0 for c in existing_clips)):
+                and all(c.stat().st_size > 0 for c in existing_clips)
+                and _stills_ok):
             self.clips = existing_clips[:expected]
-            self.video_backend = (self.job_json.get("run") or {}).get("backends", {}).get("video", "code")
-            self.log(f"visuals: resumed — reusing {len(self.clips)} scene clips")
+            self.video_backend = (self.job_json.get("run") or {}).get("backends", {}).get("video", "stills")
+            self.log(f"visuals: resumed — reusing {len(self.clips)} scene clips (real stills)")
             return {"clips": len(self.clips), "backend": self.video_backend}
         self.step("06-visuals", 45, "visuals")
         clips, video_backend, visual_msg = render_visuals(
-            self.job_dir, self.scenes, options)
+            self.job_dir, self.scenes, options, self.angle)
         self.log(f"Visuals: {video_backend or 'FAILED'} — {visual_msg}")
         if not clips:
             raise _StepFail(visual_msg, "06-visuals", 45)
@@ -341,18 +360,25 @@ class _Runner:
     # -- step 5: captions -------------------------------------------------
     def do_captions(self) -> dict:
         options, cfg = self.options, self.cfg
-        if "captions" in self.completed and (self.job_dir / "captions.srt").exists():
+        if "captions" in self.completed and (self.job_dir / "captions.srt").exists() \
+                and not (self.job_dir / "captions-note.txt").exists():
             self.caption_path = self.job_dir / "captions.srt"
-            self.caption_backend = ("script-srt" if (self.job_dir / "captions-note.txt").exists()
-                                    else "faster-whisper")
-            self.log("captions: resumed — reusing captions.srt")
+            self.caption_backend = "faster-whisper"
+            self.log("captions: resumed — reusing real ASR captions.srt")
             return {"captions": str(self.caption_path), "backend": self.caption_backend}
         if options.captions and options.caption_backend != "off":
             self.step("07-captions", 65, "captions")
             caption_path = make_captions(self.job_dir, self.script, self.audio_path, cfg)
+            if caption_path is None:
+                # No real ASR timing: NO captions burned in (never guess).
+                self.caption_path = None
+                self.caption_backend = "off (no real timing)"
+                self.log("Captions: none — no faster-whisper timing; "
+                         "captions-estimated.srt saved for CapCut only, never burned in.")
+                self.checkpoint("captions", 70, "assembling", "captions off (no real timing)")
+                return {"captions": None, "backend": self.caption_backend}
             self.caption_path = caption_path
-            self.caption_backend = ("script-srt" if (self.job_dir / "captions-note.txt").exists()
-                                    else "faster-whisper")
+            self.caption_backend = "faster-whisper"
             self.log(f"Captions: {self.caption_backend} -> {caption_path.name}")
             self.checkpoint("captions", 70, "assembling", "captions done")
             return {"captions": str(caption_path), "backend": self.caption_backend}
@@ -379,7 +405,10 @@ class _Runner:
         thumb = make_thumbnail(self.job_dir, self.topic, self.angle, options)
         self.thumb = thumb
         if thumb:
-            self.log(f"Thumbnail: {thumb.name} (same angle as script)")
+            self.log(f"Thumbnail: {thumb.name} (real still, no text added)")
+        else:
+            self.log("Thumbnail: none yet — needs a real still "
+                     "(see prompts/stills-prompts.md); no coloured card made.")
         return {"output": str(self.out_path),
                 "thumbnail": str(thumb) if thumb else None}
 
@@ -422,8 +451,9 @@ class _Runner:
             "audio_backend": self.audio_backend, "video_backend": self.video_backend,
             "caption_backend": self.caption_backend, "flow_credits_spent": 0,
             "omni_credits_estimate": 0,
-            "note": "Auto visuals cost 0 Omni Flash credits. Flow credits only apply "
-                    "if you later generate manual Flow clips (see prompts/flow-prompts.txt).",
+            "note": "Auto visuals cost 0 Omni Flash credits (real stills + "
+                    "FFmpeg Ken Burns). Flow credits only apply if you later "
+                    "generate manual Flow clips (see prompts/flow-prompts.txt).",
             "elapsed_sec": round(time.time() - self.started, 1),
             "output": str(self.out_path), "qc": qc,
         }

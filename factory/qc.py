@@ -12,8 +12,13 @@ This gate checks, before a job may be marked done:
     - repetitive_script: script too similar to an earlier job's script
     - angle_reused:     chosen angle too similar to an earlier job's angle
     - generic_visuals:  scene visuals are (near-)identical across scenes
+    - missing_still / placeholder_still: a scene has no real still, or
+      its still is a solid-colour placeholder (v2.3 — the 2/10 video)
     - demand_drop:      demand verdict was DROP
     - no_audio / no_video / duration far off target
+  WARNINGS also include:
+    - captions_estimated: captions are timed from the script, not ASR
+      (they are never burned in — see factory/captions.py)
   WARNINGS (job may finish, but the warning is logged + shown):
     - pronunciation:    a difficult name in the script has no entry in
                         pronunciation.md (learn from the WWII review)
@@ -124,6 +129,31 @@ def run_qc(job_dir: Path, script: str, angle: dict, scenes: list[dict],
     if (angle or {}).get("demand_verdict") == "DROP":
         blockers.append("demand_drop: the demand check said DROP — do not make this video.")
 
+    # --- real stills (v2.3) ----------------------------------------------
+    try:
+        from .stills import check_stills, find_still
+        import hashlib as _hashlib
+        _check = check_stills(job_dir, scenes)
+        details["stills_present"] = (f"{_check['present_count']}/"
+                                     f"{_check['expected']}")
+        for m in _check["missing"]:
+            blockers.append(
+                f"{'placeholder_still' if m['reason'] != 'missing' else 'missing_still'}: "
+                f"scene {m['scene']} has no real still ({m['filename']}, "
+                f"{m['reason']}) — generate it in Nano Banana from "
+                f"prompts/stills-prompts.md and re-run.")
+        _hashes = []
+        for i in range(len(scenes)):
+            _f = find_still(job_dir, i)
+            if _f:
+                _hashes.append(_hashlib.sha256(_f.read_bytes()).hexdigest())
+        details["distinct_stills"] = f"{len(set(_hashes))}/{len(_hashes)}"
+        if _hashes and len(set(_hashes)) < len(_hashes):
+            blockers.append("generic_visuals: two or more scenes reuse the "
+                            "same still image — every scene needs its own visual.")
+    except Exception as e:  # noqa: BLE001 - a stills check must never crash QC
+        warnings.append(f"stills check could not run ({e}) — check stills by hand.")
+
     # --- generic visuals -------------------------------------------------
     visuals = [str(s.get("visual", "")).strip().lower() for s in scenes]
     distinct = len(set(visuals))
@@ -155,6 +185,13 @@ def run_qc(job_dir: Path, script: str, angle: dict, scenes: list[dict],
             warnings.append("custom_instructions_not_reflected: none of the "
                             "job's own instruction keywords appear in the "
                             "script or angle — check the instructions were honoured.")
+
+    # --- captions are real timing, not estimates -------------------------
+    if (job_dir / "captions-note.txt").exists():
+        warnings.append("captions_estimated: captions are timed from the "
+                        "script, not ASR — they were NOT burned in. Install "
+                        "faster-whisper and re-run for real captions, or "
+                        "hand-correct captions-estimated.srt in CapCut.")
 
     # --- pronunciation -----------------------------------------------------
     pron = (job_dir / "pronunciation.md").read_text(encoding="utf-8", errors="ignore") \

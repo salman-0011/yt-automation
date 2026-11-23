@@ -78,6 +78,16 @@ def create_job(topic: str, kind: str, config: Config | None = None,
     job_dir.mkdir(parents=True, exist_ok=True)
     for sub in ("clips", "voice", "stills", "prompts"):
         (job_dir / sub).mkdir(exist_ok=True)
+    (job_dir / "stills" / "README.md").write_text(
+        "# Stills — drop real images here\n\n"
+        "One file per scene, named scene-01.jpg, scene-02.jpg, ...\n"
+        "(jpg, png or webp). Generate each one in Nano Banana from\n"
+        "prompts/stills-prompts.md — that file is written when the\n"
+        "script is ready, one prompt per scene.\n\n"
+        "A missing still stops the run with the exact filename — no\n"
+        "coloured card or text card is ever rendered as a substitute.\n"
+        "Do NOT put files in stills/auto/ (old text cards, ignored).\n",
+        encoding="utf-8")
 
     job = Job(slug=slug, topic=topic, kind=kind, channel=channel,
               options=opts.to_dict())

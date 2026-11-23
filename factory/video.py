@@ -107,8 +107,7 @@ def assemble_with_moviepy(job_dir: Path, clips: list, audio_path,
     FFmpeg for the same video (a 15-second slideshow took ~8 minutes
     on one CPU in published measurements). It is kept as a pluggable
     option for timeline work (cuts / ordering / fades) where Python
-    control matters, not as the default. No TextClip / ImageMagick is
-    used (Pillow makes the text), and no subtitles are burned in here
+    control matters, not as the default. No text is burned in here
     — if captions are requested, the caller uses FFmpeg instead.
     Returns (ok, output_path_or_None, message).
     """
@@ -180,11 +179,27 @@ def assemble_auto(job_dir: Path, clips: list, audio_path, caption_path,
     # Clips live in clips/, so run ffmpeg with cwd=clips and relative names.
     out = job_dir / f"output-{options.kind}.mp4"
     vf = f"scale={options.width}:{options.height},format=yuv420p"
+    # Captions: ONE layer only, bottom safe zone, and ONLY real ASR
+    # timing. Estimated SRTs (captions-estimated.srt, or a captions.srt
+    # marked by captions-note.txt) are never burned in — a video with
+    # no captions beats one with wrong, overlapping captions. Scene
+    # clips contain no text at all, so captions can never overlap
+    # another text layer.
+    real_captions = False
     if caption_path and Path(caption_path).exists():
+        from .captions import has_real_captions
+        real_captions = (Path(caption_path).name == "captions.srt"
+                         and has_real_captions(job_dir))
+    if real_captions:
+        assert caption_path is not None
         srt = str(Path(caption_path).resolve()).replace("\\", "/").replace(":", "\\:")
+        fontsize = 20 if options.width <= 720 else 24
         vf += (f",subtitles='{srt}':force_style="
-               "'Fontsize=22,PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,"
-               "BorderStyle=1,Outline=2,Alignment=2,MarginV=40'")
+               f"'Fontsize={fontsize},PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,"
+               "BorderStyle=1,Outline=2,Alignment=2,MarginV=32'")
+    elif caption_path:
+        msg += (" Captions NOT burned in: no real ASR timing available "
+                "(see captions-estimated.srt — hand-correct in CapCut).")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "auto-clips.txt",
            "-i", str(audio_path), "-vf", vf, "-r", "24"] + enc_args + [
            "-c:a", "aac", "-b:a", "128k",
@@ -196,7 +211,7 @@ def assemble_auto(job_dir: Path, clips: list, audio_path, caption_path,
         if r.returncode == 0 and out.exists() and out.stat().st_size > 0:
             return True, out, ((msg + " " if msg else "") + f"Assembled: {out} "
                                f"({options.size}, {enc}, captions="
-                               f"{'yes' if caption_path else 'no'})")
+                               f"{'yes (real ASR)' if real_captions else 'no'})")
         if out.exists() and out.stat().st_size == 0:
             out.unlink(missing_ok=True)  # never leave a 0-byte "output" behind
         return False, None, f"FFmpeg assemble failed: {r.stderr[-800:]}"

@@ -47,7 +47,7 @@ Topic + skill + custom instructions (dashboard / CLI)
                         + demand PROCEED / REFRAME / DROP (DROP stops all)
     2. write_script  — hook + script + thumbnail follow that one angle
     3. make_voice    — Charon (Gemini TTS) / Kokoro / Piper / existing mp3
-    4. make_visuals  — motion-canvas -> manim -> code (Pillow + FFmpeg)
+    4. make_visuals  — stills (default: real stills + Ken Burns) -> motion-canvas -> manim. No text-card fallback.
     5. make_captions — faster-whisper (CPU) / script SRT
     6. assemble_video— FFmpeg (default) or MoviePy + thumbnail (same angle)
     7. run_qc        — pre-publish gate (factory/qc.py)
@@ -80,7 +80,7 @@ Topic + skill + custom instructions (dashboard / CLI)
 | plan_angle | The one angle, person, problem, hook, thumbnail angle, demand verdict | Validates + saves angle.md / angle.json / prompts/thumbnail.md |
 | write_script | The full narration | Validates word count, saves script.md, splits scenes, writes storyboard |
 | make_voice | — (no content args) | Renders Charon / Kokoro / Piper / existing mp3 |
-| make_visuals | — | Renders scene clips (motion-canvas -> manim -> code) |
+| make_visuals | — | Renders scene clips from real stills (Ken Burns); missing still fails the job with filename + prompt |
 | make_captions | — | faster-whisper (CPU) or script-timed SRT |
 | assemble_video | — | FFmpeg (default) or MoviePy + thumbnail |
 | run_qc | — | Runs the QC gate, returns pass/blockers/warnings |
@@ -134,12 +134,12 @@ instructions actually show up in the script or angle.
 | Supervisor | Muse via genai-sdk (agent), gemini-cli / antigravity (manual fallback only), none | GEMINI_API_KEY + google-genai for genai-sdk | none (use script.md) |
 | Script | job script.md, Muse via gemini-api | key for gemini-api | stops with a clear error, never a generic script |
 | Audio | gemini-tts, kokoro, piper, existing | key / `kokoro` / `piper` / voice/*.mp3 | next backend in order |
-| Video | code, motion-canvas, manim, flow-manual | Pillow+FFmpeg / Node / manim | code (always, if Pillow+FFmpeg exist) |
+| Video | stills, motion-canvas, manim, flow-manual | Real stills + FFmpeg Ken Burns / Node / manim | stills (needs stills/scene-NN.jpg per scene) |
 | Captions | faster-whisper, script-srt, off | faster-whisper installed | script-srt |
 | Assemble | FFmpeg (default) or MoviePy | FFmpeg on PATH; MoviePy if chosen | FFmpeg (MoviePy fails -> FFmpeg; captions on -> FFmpeg) |
 
 Pick per job in the dashboard (every option is a dropdown) or on the
-CLI: `python -m factory.cli auto --job <slug> --video-backend code
+CLI: `python -m factory.cli auto --job <slug> --video-backend stills
 --audio-backend gemini-tts --duration 40 --aspect 9:16
 --skill origin-loop-shorts --custom "focus on the engineer who built it"`.
 `--fresh` re-does every step instead of resuming.
@@ -183,13 +183,13 @@ CLI: `python -m factory.cli auto --job <slug> --video-backend code
 - Run fails at voice: no key and no Kokoro/Piper and no voice/*.mp3.
   Record Charon in AI Studio into voice/act-01.mp3 and pick audio
   backend "existing", or set GEMINI_API_KEY.
-- Run fails at visuals: Pillow or FFmpeg missing. `pip install pillow`
+- Run fails at visuals: a still is missing. Generate it in Nano Banana from prompts/stills-prompts.md, drop it in jobs/<slug>/stills/, press Run again. Pillow or FFmpeg missing: `pip install pillow`.
   and install FFmpeg (https://ffmpeg.org/download.html, add to PATH).
 - Output is shorter than the target: the narration was faster than
   152 wpm. QC tolerates ±25%; re-run with a longer script or a
   bigger --duration.
 - Motion Canvas / Manim render failed: check run-log.md — the run
-  fell back to the code backend automatically and still finished.
+  stopped at the visuals step with the missing stills listed — no substitute was rendered.
 - Job is needs-review: read qc-report.md, fix the issue, press Run
   again (it resumes from the failed step) — or Approve it in the
   dashboard after reviewing the video yourself.

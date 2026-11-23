@@ -42,11 +42,11 @@
       <label>Type <select id="kind"><option value="short">Short (Origin Loop)</option><option value="long">Long-form (Tiny Timeline Lab)</option></select></label>
       <label>Duration (sec) <input id="duration" type="number" value="40" min="15" max="3600"></label>
       <label>Aspect <select id="aspect"><option value="auto">Auto (9:16 Short / 16:9 long)</option><option value="9:16">9:16 vertical</option><option value="16:9">16:9 horizontal</option></select></label>
-      <label>Style <select id="style"><option value="auto">Auto — cinematic realistic (Shorts) / 2.5D cartoon (long-form)</option><option value="cinematic-realistic">Cinematic realistic</option><option value="2.5d-cartoon">2.5D cartoon</option><option value="diagram">Diagram</option><option value="map">Map</option><option value="cinematic-code">Cinematic (code visuals)</option></select></label>
-      <label>Video backend <select id="video_backend"><option value="auto">Auto (best available)</option><option value="code">Code — Pillow + FFmpeg (always works)</option><option value="motion-canvas">Motion Canvas</option><option value="manim">Manim</option><option value="flow-manual">Flow — manual only (no auto video)</option></select></label>
+      <label>Style <select id="style"><option value="auto">Auto — cinematic realistic (Shorts) / 2.5D cartoon (long-form)</option><option value="cinematic-realistic">Cinematic realistic</option><option value="2.5d-cartoon">2.5D cartoon</option><option value="diagram">Diagram</option><option value="map">Map</option></select></label>
+      <label>Video backend <select id="video_backend"><option value="auto">Auto (best available)</option><option value="stills">Stills — real images + Ken Burns (recommended)</option><option value="motion-canvas">Motion Canvas</option><option value="manim">Manim</option><option value="flow-manual">Flow — manual only (no auto video)</option></select></label>
       <label>Audio backend <select id="audio_backend"><option value="auto">Auto (best available)</option><option value="gemini-tts">Gemini TTS — Charon</option><option value="kokoro">Kokoro (local, draft)</option><option value="piper">Piper (local, draft)</option><option value="existing">Existing voice/*.mp3</option></select></label>
       <label>Voice <input id="voice_name" value="Charon"></label>
-      <label>Captions backend <select id="caption_backend"><option value="auto">Auto</option><option value="faster-whisper">faster-whisper (CPU)</option><option value="script-srt">Script SRT (timed from script)</option><option value="off">Off</option></select></label>
+      <label>Captions backend <select id="caption_backend"><option value="auto">Auto</option><option value="faster-whisper">faster-whisper (CPU)</option><option value="script-srt">Script SRT (estimate only — never burned in)</option><option value="off">Off</option></select></label>
       <label>Supervisor <select id="supervisor_backend"><option value="auto">Auto — Muse via Gen AI SDK (if key set)</option><option value="genai-sdk">Gen AI SDK agent (Muse supervisor)</option><option value="gemini-cli">Gemini CLI — manual fallback only</option><option value="antigravity">AntiGravity CLI — manual fallback only</option><option value="none">None — use my script.md</option></select></label>
       <label>Assembler <select id="assembler"><option value="auto">Auto — FFmpeg (fast)</option><option value="ffmpeg">FFmpeg</option><option value="moviepy">MoviePy (slower, Python timeline)</option></select></label>
       <label>Skill <select id="skill"><option value="auto">Auto (Short skill / long-form skill by type)</option></select></label>
@@ -143,6 +143,17 @@ async function approveJob(slug){
 async function showJob(slug){
   const job = await j('/api/jobs/' + encodeURIComponent(slug));
   if(job.error){ document.getElementById('detail').textContent = job.error; return; }
+  let stillsHtml = '<p class="muted">Stills: loading…</p>';
+  try{
+    const st = await j('/api/jobs/' + encodeURIComponent(slug) + '/stills');
+    if(!st.error){
+      stillsHtml = '<p><b>Stills</b> — ' + st.present_count + '/' + st.expected + ' present' +
+        (st.missing && st.missing.length ? ' — <b>missing:</b> ' + st.missing.map(m => esc(m.filename)).join(', ') : ' — all present') + '</p>' +
+        '<p class="muted">Generate missing stills in Nano Banana from prompts/stills-prompts.md, save as jobs/' + esc(slug) + '/stills/&lt;filename&gt;, then press Run again. A missing still stops the run — no coloured card is ever rendered.</p>' +
+        (st.missing && st.missing.length ? '<details><summary>Generate stills prompts (Nano Banana — manual, no API)</summary>' +
+          st.missing.map(m => '<div class="card"><b>Scene ' + m.scene + ' — ' + esc(m.filename) + '</b> (' + esc(m.reason) + ')<br><span class="muted">' + esc(m.prompt) + '</span></div>').join('') + '</details>' : '');
+    }
+  }catch(e){ stillsHtml = '<p class="muted">Stills: could not load.</p>'; }
   const run = job.run || {};
   const steps = ['01-plan-supervisor','02-research','03-script','04-storyboard','05-voice','06-visuals','07-captions','08-assemble','09-qc'];
   const opts = job.options || {};
@@ -151,6 +162,7 @@ async function showJob(slug){
     '<span class="badge">' + esc(job.channel) + '</span><br><span class="muted">slug: ' + esc(job.slug) +
     ' • status: ' + esc(job.status) + ' • verdict: ' + esc(job.verdict) +
     ' • clips: ' + (job.clips||0) + ' • output video: ' + (job.has_output ? 'yes' : 'not yet') + '</span>' +
+    stillsHtml +
     '<p><b>Options</b> <span class="muted">' + esc(JSON.stringify(opts)) + '</span></p>' +
     '<p><b>Angle</b> — ' + esc((job.angle && job.angle.angle) || 'not chosen yet') + '</p>' +
     '<p><b>Skill</b> — ' + esc(opts.skill || 'auto') + ' &nbsp; <b>Custom instructions</b> — ' + esc(opts.custom_instructions || '(none)') + '</p>' +
@@ -186,8 +198,8 @@ async function refresh(){
       (cred.long_estimate ? cred.long_estimate.primary + ' primary + ' + cred.long_estimate.retake_reserve + ' reserve = ' + cred.long_estimate.max + ' max' : '594 max') +
       '. Each account: 1000 starting + 50/day.';
     document.getElementById('updated').textContent = '— updated ' + new Date().toLocaleTimeString();
-    document.getElementById('jobs').innerHTML = jobs.length ? '<table><tr><th>Topic</th><th>Type</th><th>Channel</th><th>Status</th><th>Run</th><th>Output</th><th></th></tr>' +
-      jobs.map(x => { const r = x.run || {}; return '<tr><td>' + esc(x.topic) + '</td><td>' + esc(x.kind) + '</td><td>' + esc(x.channel) + '</td><td>' + esc(x.status) + '</td><td>' + esc(r.step || '—') + ' ' + (r.progress||0) + '%</td><td>' + (x.has_output ? 'yes' : 'no') + '</td><td><button onclick="showJob(\'' + esc(x.slug) + '\')">Detail</button> <button class="run" onclick="runJob(\'' + esc(x.slug) + '\')">▶ Run</button></td></tr>'; }).join('') + '</table>'
+    document.getElementById('jobs').innerHTML = jobs.length ? '<table><tr><th>Topic</th><th>Type</th><th>Channel</th><th>Status</th><th>Stills</th><th>Run</th><th>Output</th><th></th></tr>' +
+      jobs.map(x => { const r = x.run || {}; return '<tr><td>' + esc(x.topic) + '</td><td>' + esc(x.kind) + '</td><td>' + esc(x.channel) + '</td><td>' + esc(x.status) + '</td><td>' + ((x.stills && x.stills.expected) ? x.stills.present + '/' + x.stills.expected : '—') + '</td><td>' + esc(r.step || '—') + ' ' + (r.progress||0) + '%</td><td>' + (x.has_output ? 'yes' : 'no') + '</td><td><button onclick="showJob(\'' + esc(x.slug) + '\')">Detail</button> <button class="run" onclick="runJob(\'' + esc(x.slug) + '\')">▶ Run</button></td></tr>'; }).join('') + '</table>'
       : '<p class="muted">No jobs yet — create one above.</p>';
     document.getElementById('tools').innerHTML = (toolsRes.tools||[]).map(t => {
       const cls = t.status === 'installed' || t.status === 'configured' ? 'ok' : (t.status === 'manual' ? 'manual' : 'warn');

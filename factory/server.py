@@ -10,6 +10,7 @@ Serves:
   POST /api/jobs   -> create a new job (topic, kind, + all options)
   POST /api/jobs/<slug>/run -> ONE CLICK: start the auto-run in background
   GET  /api/jobs/<slug>/run -> live run progress (step, %, message, output)
+  GET  /api/jobs/<slug>/stills -> stills present X/Y, missing stills + Nano Banana prompts
   GET  /api/health -> {"ok": true}
 
 Live updates: the dashboard polls /api/jobs every 3 seconds (simple,
@@ -30,6 +31,7 @@ from .options import (AUDIO_BACKENDS, CAPTION_BACKENDS, STYLES, ASPECTS,
                       detect_assemblers, detect_audio_backends,
                       detect_supervisor_backends, detect_video_backends)
 from .pipeline import create_job
+from .stills import stills_status
 from .skills import list_skills
 
 try:
@@ -60,6 +62,20 @@ def list_jobs(config: Config | None = None) -> list[dict]:
         data["file_count"] = len(files)
         data["clips"] = len(list((job_dir / "clips").glob("*.mp4")))
         data["has_output"] = any(job_dir.glob("output-*.mp4"))
+        try:
+            # Lightweight count only (no PIL validation, no file writes)
+            # — the full check lives in GET /api/jobs/<slug>/stills.
+            from .stills import STILL_EXTS, scenes_from_job
+            from .options import JobOptions as _JO
+            _opts = JobOptions.from_dict(data.get("options"), data.get("kind", "short"))
+            _scenes = scenes_from_job(job_dir, _opts)
+            _present = [f for f in (job_dir / "stills").glob("scene-*.*")
+                        if f.suffix.lower() in STILL_EXTS] if (job_dir / "stills").exists() else []
+            data["stills"] = {"present": len(_present), "expected": len(_scenes),
+                              "missing": [f"scene-{i + 1:02d}.jpg" for i in range(len(_scenes))
+                                          if not any(f.stem == f"scene-{i + 1:02d}" for f in _present)]}
+        except Exception:
+            data["stills"] = {"present": 0, "expected": 0, "missing": []}
         try:
             data["created"] = job_file.stat().st_mtime
         except OSError:
@@ -119,9 +135,9 @@ def tool_status(config: Config | None = None) -> list[dict]:
          "note": "3 credits/sec at 720p, inside Flow. Check Flow cost screen first."},
         {"name": "Nano Banana", "kind": "thumbnail", "status": "manual",
          "note": "NO public API. Clean image only, text added in CapCut."},
-        {"name": "Auto visuals — code (Pillow + FFmpeg)", "kind": "video",
-         "status": "installed" if detected_video["code"]["available"] else "not-installed",
-         "note": "Scene cards + kinetic text + Ken Burns zoom. 0 Flow credits."},
+        {"name": "Auto visuals — real stills (Nano Banana + FFmpeg Ken Burns)", "kind": "video",
+         "status": "installed" if detected_video["stills"]["available"] else "not-installed",
+         "note": "One real still per scene in jobs/<job>/stills/. A missing still stops the run — no text cards, no placeholder."},
         {"name": "Charon TTS (Gemini API)", "kind": "voice",
          "status": "configured" if cfg.gemini_api_key else "manual",
          "note": "Voice = Charon always. API if GEMINI_API_KEY set, else AI Studio by hand."},
@@ -167,7 +183,7 @@ def create_app(config: Config | None = None):
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": "2.2.0"}
+        return {"ok": True, "version": "2.3.0"}
 
     @app.get("/api/options")
     def options():
@@ -212,6 +228,13 @@ def create_app(config: Config | None = None):
             if j.get("slug") == slug:
                 return j
         return JSONResponse({"error": f"job not found: {slug}"}, status_code=404)
+
+    @app.get("/api/jobs/{slug}/stills")
+    def job_stills(slug: str):
+        job_dir = cfg.jobs_dir / slug
+        if not job_dir.exists():
+            return JSONResponse({"error": f"job not found: {slug}"}, status_code=404)
+        return stills_status(job_dir)
 
     @app.get("/api/credits")
     def credits():
@@ -281,7 +304,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/health":
-                return self._json({"ok": True, "version": "2.2.0"})
+                return self._json({"ok": True, "version": "2.3.0"})
             if parsed.path == "/api/options":
                 return self._json(options_payload(cfg))
             if parsed.path == "/api/jobs":
@@ -289,6 +312,12 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
             if parsed.path.endswith("/run") and parsed.path.startswith("/api/jobs/"):
                 slug = parsed.path.split("/")[-2]
                 return self._json(run_status(slug, cfg))
+            if parsed.path.endswith("/stills") and parsed.path.startswith("/api/jobs/"):
+                slug = parsed.path.split("/")[-2]
+                job_dir = cfg.jobs_dir / slug
+                if not job_dir.exists():
+                    return self._json({"error": f"job not found: {slug}"}, 404)
+                return self._json(stills_status(job_dir))
             if parsed.path.startswith("/api/jobs/"):
                 slug = parsed.path.split("/")[-1]
                 for j in list_jobs(cfg):

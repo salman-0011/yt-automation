@@ -10,7 +10,7 @@ Commands:
   status [--job slug]                   list jobs / show one job
   credits                               show balances + estimates
   voice --job slug                       write Charon act files / try Gemini TTS
-  captions --job slug                    make captions.srt (faster-whisper or estimate)
+  captions --job slug                    make captions.srt (faster-whisper only; estimate saved separately, never burned in)
   assemble --job slug [--type short|long]  FFmpeg assemble clips + voice
   review --job slug                      supervisor review (Gemini/AntiGravity CLI)
   serve                                 start the dashboard (http://localhost:8000)
@@ -58,7 +58,7 @@ def _add_option_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--style", choices=STYLES, default=None,
                    help="auto (= channel default) | cinematic-realistic | 2.5d-cartoon | diagram | map")
     p.add_argument("--video-backend", choices=VIDEO_BACKENDS, default=None,
-                   help="auto | code | motion-canvas | manim | flow-manual (manual only)")
+                   help="auto | stills | motion-canvas | manim | flow-manual (manual only)")
     p.add_argument("--audio-backend", choices=AUDIO_BACKENDS, default=None,
                    help="auto | gemini-tts (Charon) | kokoro | piper | existing")
     p.add_argument("--voice", default=None, help="Voice name (default Charon)")
@@ -251,7 +251,12 @@ def main(argv: list[str] | None = None) -> int:
         job_dir = _job_dir(args.job, cfg)
         audio = next(iter(sorted((job_dir / "voice").glob("*.mp3"))), None)
         out = make_captions(job_dir, _read_script(job_dir), audio, cfg)
-        print(f"Captions: {out}  (faster-whisper if installed, else estimated from script)")
+        if out is None:
+            print("Captions: none — no faster-whisper timing available. "
+                  "Estimate saved as captions-estimated.srt for CapCut only; nothing was burned in.")
+            print("Install faster-whisper (pip install faster-whisper) and re-run for real captions.")
+        else:
+            print(f"Captions: {out}  (faster-whisper, real ASR timing)")
         print("Hand-correct them in CapCut — never trust auto-captions blindly.")
         return 0
 
