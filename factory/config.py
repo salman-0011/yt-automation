@@ -57,6 +57,16 @@ class Config:
     # Thumbnails / stills — Nano Banana, clean image, text added in CapCut.
     thumbnail_tool: str = "nano-banana"
     editor: str = "capcut-free"
+    # Supervisor — Muse is the project manager. Muse works through the
+    # Google Gen AI SDK (factory/agent.py + factory/genai_client.py).
+    # The Gemini / AntiGravity CLIs are manual fallback only (session /
+    # auth problems) — they never drive a run.
+    supervisor_name: str = "Muse"
+    # Gen AI SDK models (real model names only — see factory/genai_client.py).
+    # Text/planning: gemini-2.5-flash (or gemini-2.5-pro via GEMINI_MODEL).
+    # Voice: gemini-2.5-flash-preview-tts, Charon. "Carbon"/"Hydrogen" are
+    # NOT Gen AI SDK models and are never used here.
+    tts_model: str = "gemini-2.5-flash-preview-tts"
     # Accounts
     accounts: list = field(default_factory=lambda: [Account("A"), Account("B")])
     # Local, CPU-first

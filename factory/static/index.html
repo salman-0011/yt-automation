@@ -32,7 +32,7 @@
 <body>
 <header>
   <h1>🎬 YT Production Factory</h1>
-  <p>Origin Loop — Shorts only &nbsp;•&nbsp; Tiny Timeline Lab — Long-form 8–10 min &nbsp;•&nbsp; One click = Run, the supervisor + Python backends make the video</p>
+  <p>Origin Loop — Shorts only &nbsp;•&nbsp; Tiny Timeline Lab — Long-form 8–10 min &nbsp;•&nbsp; One click = Run — Muse (supervisor) plans it, Python backends make the video</p>
 </header>
 <main>
   <section>
@@ -42,12 +42,15 @@
       <label>Type <select id="kind"><option value="short">Short (Origin Loop)</option><option value="long">Long-form (Tiny Timeline Lab)</option></select></label>
       <label>Duration (sec) <input id="duration" type="number" value="40" min="15" max="3600"></label>
       <label>Aspect <select id="aspect"><option value="auto">Auto (9:16 Short / 16:9 long)</option><option value="9:16">9:16 vertical</option><option value="16:9">16:9 horizontal</option></select></label>
-      <label>Style <select id="style"><option value="2.5d-cartoon">2.5D cartoon</option><option value="diagram">Diagram</option><option value="cinematic-code">Cinematic (code visuals)</option><option value="map">Map</option></select></label>
+      <label>Style <select id="style"><option value="auto">Auto — cinematic realistic (Shorts) / 2.5D cartoon (long-form)</option><option value="cinematic-realistic">Cinematic realistic</option><option value="2.5d-cartoon">2.5D cartoon</option><option value="diagram">Diagram</option><option value="map">Map</option><option value="cinematic-code">Cinematic (code visuals)</option></select></label>
       <label>Video backend <select id="video_backend"><option value="auto">Auto (best available)</option><option value="code">Code — Pillow + FFmpeg (always works)</option><option value="motion-canvas">Motion Canvas</option><option value="manim">Manim</option><option value="flow-manual">Flow — manual only (no auto video)</option></select></label>
       <label>Audio backend <select id="audio_backend"><option value="auto">Auto (best available)</option><option value="gemini-tts">Gemini TTS — Charon</option><option value="kokoro">Kokoro (local, draft)</option><option value="piper">Piper (local, draft)</option><option value="existing">Existing voice/*.mp3</option></select></label>
       <label>Voice <input id="voice_name" value="Charon"></label>
       <label>Captions backend <select id="caption_backend"><option value="auto">Auto</option><option value="faster-whisper">faster-whisper (CPU)</option><option value="script-srt">Script SRT (timed from script)</option><option value="off">Off</option></select></label>
-      <label>Supervisor <select id="supervisor_backend"><option value="auto">Auto (Gemini API if key set)</option><option value="gemini-api">Gemini API</option><option value="gemini-cli">Gemini CLI</option><option value="antigravity">AntiGravity CLI</option><option value="none">None — use my script.md</option></select></label>
+      <label>Supervisor <select id="supervisor_backend"><option value="auto">Auto — Muse via Gen AI SDK (if key set)</option><option value="genai-sdk">Gen AI SDK agent (Muse supervisor)</option><option value="gemini-cli">Gemini CLI — manual fallback only</option><option value="antigravity">AntiGravity CLI — manual fallback only</option><option value="none">None — use my script.md</option></select></label>
+      <label>Assembler <select id="assembler"><option value="auto">Auto — FFmpeg (fast)</option><option value="ffmpeg">FFmpeg</option><option value="moviepy">MoviePy (slower, Python timeline)</option></select></label>
+      <label>Skill <select id="skill"><option value="auto">Auto (Short skill / long-form skill by type)</option></select></label>
+      <label>Custom instructions <textarea id="custom_instructions" rows="2" placeholder="This job's own directions, e.g. focus on the engineer who built it, keep it under 40s, mention the 1958 failure"></textarea></label>
       <label class="check"><input id="captions" type="checkbox" checked> Captions on</label>
       <button onclick="createJob()">Create job</button>
     </div>
@@ -89,6 +92,12 @@ async function loadOptions(){
     for (const [k,v] of Object.entries(o.detected.audio)) det.push('audio/' + k + ': ' + (v.available ? 'yes' : 'no'));
     for (const [k,v] of Object.entries(o.detected.supervisor)) det.push('supervisor/' + k + ': ' + (v.available ? 'yes' : 'no'));
     document.getElementById('detected').textContent = 'Detected on this machine — ' + det.join(' • ');
+    const sel = document.getElementById('skill');
+    (o.skills || []).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.name; opt.textContent = s.name + ' — ' + s.title + ' [' + s.kind + ']';
+      sel.appendChild(opt);
+    });
   }catch(e){}
 }
 
@@ -105,7 +114,10 @@ async function createJob(){
     voice_name: document.getElementById('voice_name').value || 'Charon',
     captions: document.getElementById('captions').checked,
     caption_backend: document.getElementById('caption_backend').value,
-    supervisor_backend: document.getElementById('supervisor_backend').value};
+    supervisor_backend: document.getElementById('supervisor_backend').value,
+    assembler: document.getElementById('assembler').value,
+    skill: document.getElementById('skill').value,
+    custom_instructions: document.getElementById('custom_instructions').value};
   const res = await j('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   if(res.error){ document.getElementById('newmsg').textContent = 'Error: ' + res.error; return; }
   document.getElementById('newmsg').textContent = 'Created: ' + res.job.slug + ' in ' + res.path + ' — now press Run on it below.';
@@ -117,6 +129,13 @@ async function runJob(slug){
   const res = await j('/api/jobs/' + encodeURIComponent(slug) + '/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
   if(res.error){ alert('Error: ' + res.error); return; }
   if(!res.started){ alert(res.message || 'Run did not start.'); return; }
+  showJob(slug);
+  refresh();
+}
+
+async function approveJob(slug){
+  const res = await j('/api/jobs/' + encodeURIComponent(slug) + '/approve', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({note: 'reviewed in dashboard'})});
+  if(!res.approved){ alert(res.message || 'Approval failed.'); return; }
   showJob(slug);
   refresh();
 }
@@ -133,11 +152,15 @@ async function showJob(slug){
     ' • status: ' + esc(job.status) + ' • verdict: ' + esc(job.verdict) +
     ' • clips: ' + (job.clips||0) + ' • output video: ' + (job.has_output ? 'yes' : 'not yet') + '</span>' +
     '<p><b>Options</b> <span class="muted">' + esc(JSON.stringify(opts)) + '</span></p>' +
+    '<p><b>Angle</b> — ' + esc((job.angle && job.angle.angle) || 'not chosen yet') + '</p>' +
+    '<p><b>Skill</b> — ' + esc(opts.skill || 'auto') + ' &nbsp; <b>Custom instructions</b> — ' + esc(opts.custom_instructions || '(none)') + '</p>' +
+    (run.library ? '<p><b>Library</b> — <span class="muted">' + esc(run.library.video) + '</span>' + (run.library.thumbnail ? '<br>Thumbnail: <span class="muted">' + esc(run.library.thumbnail) + '</span>' : '') + '</p>' : '') +
+    (run.status === 'needs-review' ? '<button class="run" onclick="approveJob(\'' + esc(job.slug) + '\')">✓ Approve (I reviewed it — mark done + publish to library)</button> ' : '') +
     '<p><b>Run</b> — ' + esc(run.step || 'not run yet') + ' • ' + (run.progress||0) + '% • ' + esc(run.message || '') + '</p>' +
     '<div class="bar"><div style="width:' + (run.progress||0) + '%"></div></div>' +
     (run.output ? '<p>Output: <span class="muted">' + esc(run.output) + '</span></p>' : '') +
     '<button class="run" onclick="runJob(\'' + esc(job.slug) + '\')">▶ Run automatically</button> ' +
-    '<span class="muted">One click — supervisor + backends make the video. See run-log.md in the job folder for the full log.</span>' +
+    '<span class="muted">One click — Muse plans it, backends make the video. See run-log.md in the job folder for the full log.</span>' +
     '<p><b>Pipeline steps</b></p><ol>' + steps.map(s => '<li>' + s + '</li>').join('') + '</ol>' +
     '<p><b>Files produced (' + (job.file_count||0) + ')</b></p><p class="muted">' +
     (job.files||[]).map(esc).join('<br>') + '</p>' +

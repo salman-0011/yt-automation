@@ -15,12 +15,34 @@ when the user picks "auto"):
                   them. Choosing this means: do NOT auto-render visuals.
 
 Audio backends (pluggable):
-  gemini-tts    — Gemini Flash TTS API, voice Charon. Needs GEMINI_API_KEY.
+  gemini-tts    — Gemini Flash TTS API (Gen AI SDK), voice Charon. Needs GEMINI_API_KEY.
   kokoro        — Kokoro-82M, local CPU. Needs `kokoro` installed.
   piper         — Piper TTS, local CPU, offline. Needs `piper` installed.
   existing      — Use voice/*.mp3 already in the job folder (e.g. Charon
                   recorded by hand in Google AI Studio). No synthesis.
 ElevenLabs is captions ONLY in this project — it is never a voice backend.
+
+Supervisor (Muse, the project manager):
+  genai-sdk     — Google Gen AI SDK (`google-genai`, API key). THE default.
+                  Stable; the agent calls the pipeline tools in order.
+  gemini-api    — alias of genai-sdk (kept for old jobs / CLI).
+  gemini-cli / antigravity — MANUAL FALLBACK ONLY. Session/auth problems;
+                  they review a job folder when asked, never drive a run.
+
+Video form / style (per job, frontend dropdown):
+  auto (default) — Origin Loop Shorts: cinematic-realistic;
+                   Tiny Timeline Lab long-form: 2.5d-cartoon. The channel
+                   pattern in skills/*.md keeps the look consistent.
+  cinematic-realistic / cinematic-code — cinematic realistic (Pillow+FFmpeg).
+  2.5d-cartoon  — 2.5D cartoon / map animation (Motion Canvas / Manim / code).
+  diagram | map — diagram / map-focused scenes.
+
+Assemblers (how scene clips + audio become the mp4):
+  ffmpeg (default) — fast, CPU, burned-in subtitles. Always available.
+  moviepy       — Python timeline assembly (MoviePy 2.x, CPU, no GPU).
+                  Slower than FFmpeg (frames built in Python); no burned-in
+                  subtitles — if captions are on, the run uses FFmpeg
+                  instead and says so in the log.
 """
 from __future__ import annotations
 
@@ -30,8 +52,9 @@ from dataclasses import dataclass, field
 VIDEO_BACKENDS = ["auto", "code", "motion-canvas", "manim", "flow-manual"]
 AUDIO_BACKENDS = ["auto", "gemini-tts", "kokoro", "piper", "existing"]
 CAPTION_BACKENDS = ["auto", "faster-whisper", "script-srt", "off"]
-SUPERVISOR_BACKENDS = ["auto", "gemini-api", "gemini-cli", "antigravity", "none"]
-STYLES = ["2.5d-cartoon", "diagram", "cinematic-code", "map"]
+SUPERVISOR_BACKENDS = ["auto", "genai-sdk", "gemini-api", "gemini-cli", "antigravity", "none"]
+STYLES = ["auto", "cinematic-realistic", "cinematic-code", "2.5d-cartoon", "diagram", "map"]
+ASSEMBLERS = ["auto", "ffmpeg", "moviepy"]
 ASPECTS = ["auto", "9:16", "16:9"]
 
 # Fallback orders when the user picks "auto".
@@ -76,15 +99,44 @@ def detect_audio_backends(gemini_key: str = "") -> dict[str, dict]:
 
 def detect_supervisor_backends(gemini_key: str = "", gemini_cli: str = "gemini",
                                antigravity_cli: str = "antigravity") -> dict[str, dict]:
+    from .genai_client import sdk_available
+    sdk = sdk_available()
     return {
-        "gemini-api": {"available": bool(gemini_key),
-                       "note": "Gemini API (GEMINI_API_KEY). Plans the job, writes the script."},
+        "genai-sdk": {"available": bool(gemini_key) and sdk,
+                      "note": ("Muse supervisor via Google Gen AI SDK (stable, API key). "
+                               "The default. Agent calls the pipeline tools in order."
+                               if sdk else "Needs: pip install google-genai + GEMINI_API_KEY.")},
+        "gemini-api": {"available": bool(gemini_key) and sdk,
+                       "note": "Alias of genai-sdk (kept for old jobs / CLI)."},
         "gemini-cli": {"available": shutil.which(gemini_cli) is not None,
-                       "note": "Gemini CLI on PATH. Supervisor review only."},
+                       "note": "MANUAL FALLBACK ONLY — session/auth problems. Reviews a job folder when asked; never drives a run."},
         "antigravity": {"available": shutil.which(antigravity_cli) is not None,
-                        "note": "AntiGravity CLI on PATH. Supervisor review only."},
+                        "note": "MANUAL FALLBACK ONLY — session/auth problems. Reviews a job folder when asked; never drives a run."},
         "none": {"available": True, "note": "No LLM supervisor — use the script.md already in the job."},
     }
+
+
+def detect_assemblers() -> dict[str, dict]:
+    """Which assemblers can run on this machine (CPU only, no GPU)."""
+    return {
+        "ffmpeg": {"available": shutil.which("ffmpeg") is not None,
+                   "note": "FFmpeg concat + loudnorm. Fast, CPU. Default."},
+        "moviepy": {"available": _has("moviepy"),
+                    "note": ("MoviePy 2.x timeline assembly, CPU (no GPU needed). "
+                             "Slower than FFmpeg — frames are built in Python. "
+                             "No burned-in subtitles; captions fall back to FFmpeg."
+                             if _has("moviepy") else "Needs: pip install moviepy")},
+    }
+
+
+def resolve_supervisor(want: str, gemini_key: str = "") -> str:
+    """Normalise a supervisor choice: gemini-api -> genai-sdk; auto -> genai-sdk if ready."""
+    if want in ("gemini-api", "genai-sdk"):
+        return "genai-sdk"
+    if want == "auto":
+        from .genai_client import sdk_ready
+        return "genai-sdk" if (gemini_key and sdk_ready()) else "none"
+    return want
 
 
 @dataclass
@@ -93,15 +145,19 @@ class JobOptions:
     kind: str = "short"            # short | long
     duration_sec: int = 40         # Short default 40; long default 540
     aspect: str = "auto"           # auto | 9:16 | 16:9 (auto = kind)
-    style: str = "2.5d-cartoon"    # 2.5d-cartoon | diagram | cinematic-code | map
+    style: str = "auto"            # auto | cinematic-realistic | cinematic-code |
+                                   # 2.5d-cartoon | diagram | map (auto = channel default)
+    assembler: str = "auto"        # auto | ffmpeg | moviepy (auto = ffmpeg)
     video_backend: str = "auto"    # auto | code | motion-canvas | manim | flow-manual
     audio_backend: str = "auto"    # auto | gemini-tts | kokoro | piper | existing
     voice_name: str = "Charon"     # Charon always for final videos
     captions: bool = True
     caption_backend: str = "auto"  # auto | faster-whisper | script-srt | off
-    supervisor_backend: str = "auto"  # auto | gemini-api | gemini-cli | antigravity | none
+    supervisor_backend: str = "auto"  # auto | genai-sdk | gemini-api(alias) | gemini-cli | antigravity | none
     language: str = "en"
     resolution: str = "720p"       # 720p on this laptop; 1080p is slow
+    skill: str = "auto"            # auto | origin-loop-shorts | tiny-timeline-longform | <skills/*.md stem>
+    custom_instructions: str = ""  # per-job instructions, used by the supervisor + checked in QC
 
     def __post_init__(self) -> None:
         if self.kind not in ("short", "long"):
@@ -118,8 +174,16 @@ class JobOptions:
             self.caption_backend = "auto"
         if self.supervisor_backend not in SUPERVISOR_BACKENDS:
             self.supervisor_backend = "auto"
+        if self.supervisor_backend == "gemini-api":
+            self.supervisor_backend = "genai-sdk"  # alias
+        if self.assembler not in ASSEMBLERS:
+            self.assembler = "auto"
         if self.style not in STYLES:
-            self.style = "2.5d-cartoon"
+            self.style = "auto"
+        if self.style == "auto":
+            # Channel default: cinematic realistic Shorts, 2.5D cartoon long-form.
+            self.style = ("cinematic-realistic" if self.kind == "short"
+                          else "2.5d-cartoon")
 
     @property
     def width(self) -> int:

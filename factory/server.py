@@ -22,14 +22,15 @@ import json
 import os
 from pathlib import Path
 
-from .auto import run_job_async, run_status
+from .auto import approve_job, run_job_async, run_status
 from .config import Config
 from .credits import CreditLedger
 from .options import (AUDIO_BACKENDS, CAPTION_BACKENDS, STYLES, ASPECTS,
                       SUPERVISOR_BACKENDS, VIDEO_BACKENDS, JobOptions,
-                      detect_audio_backends, detect_supervisor_backends,
-                      detect_video_backends)
+                      detect_assemblers, detect_audio_backends,
+                      detect_supervisor_backends, detect_video_backends)
 from .pipeline import create_job
+from .skills import list_skills
 
 try:
     from fastapi import FastAPI  # type: ignore
@@ -86,6 +87,9 @@ def options_payload(config: Config | None = None) -> dict:
         },
         "defaults": JobOptions(kind="short").to_dict(),
         "defaults_long": JobOptions(kind="long").to_dict(),
+        "skills": list_skills(),
+        "assemblers": detect_assemblers(),
+        "supervisors": detect_supervisor_backends(cfg.gemini_api_key),
     }
 
 
@@ -98,9 +102,11 @@ def tool_status(config: Config | None = None) -> list[dict]:
     detected_video = detect_video_backends()
     detected_audio = detect_audio_backends(cfg.gemini_api_key)
     return [
-        {"name": "Supervisor (Gemini API)", "kind": "supervisor",
-         "status": "configured" if cfg.gemini_api_key else "not-configured",
-         "note": "Central Project Manager. Plans the job + writes the script. Needs GEMINI_API_KEY."},
+        {"name": "Supervisor — Muse (project manager)", "kind": "supervisor",
+         "status": "configured" if cfg.gemini_api_key else "ready",
+         "note": "Muse plans each job via the Google Gen AI SDK agent "
+                 "(tool-calling: angle, script, voice, visuals, captions, "
+                 "assemble, QC). CLIs are manual fallback only."},
         {"name": "Gemini CLI", "kind": "supervisor",
          "status": "installed" if shutil.which(cfg.gemini_cli) else "not-installed",
          "note": "LLM supervisor. Run `gemini` in terminal, or use Tools card."},
@@ -161,7 +167,7 @@ def create_app(config: Config | None = None):
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": "2.0.0"}
+        return {"ok": True, "version": "2.2.0"}
 
     @app.get("/api/options")
     def options():
@@ -185,6 +191,12 @@ def create_app(config: Config | None = None):
                                               encoding="utf-8")
         res = run_job_async(slug, cfg, opts)
         return res if res.get("started") else JSONResponse(res, status_code=409)
+
+    @app.post("/api/jobs/{slug}/approve")
+    def approve(slug: str, payload: dict | None = None):
+        note = (payload or {}).get("note", "")
+        res = approve_job(slug, cfg, note)
+        return res if res.get("approved") else JSONResponse(res, status_code=400)
 
     @app.get("/api/jobs/{slug}/run")
     def run_progress(slug: str):
@@ -223,7 +235,8 @@ def create_app(config: Config | None = None):
         opts = {k: payload.get(k) for k in
                 ("duration_sec", "aspect", "style", "video_backend",
                  "audio_backend", "voice_name", "captions", "caption_backend",
-                 "supervisor_backend", "language", "resolution")
+                 "supervisor_backend", "language", "resolution",
+                 "skill", "custom_instructions", "assembler")
                 if payload.get(k) not in (None, "")}
         if isinstance(opts.get("duration_sec"), str):
             try:
@@ -268,7 +281,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/health":
-                return self._json({"ok": True, "version": "2.0.0"})
+                return self._json({"ok": True, "version": "2.2.0"})
             if parsed.path == "/api/options":
                 return self._json(options_payload(cfg))
             if parsed.path == "/api/jobs":
@@ -321,6 +334,15 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
                     (job_dir / "job.json").write_text(json.dumps(job_json, indent=2), encoding="utf-8")
                 res = run_job_async(slug, cfg, opts)
                 return self._json(res, 200 if res.get("started") else 409)
+            if parsed.path.endswith("/approve") and parsed.path.startswith("/api/jobs/"):
+                slug = parsed.path.split("/")[-2]
+                length = int(self.headers.get("Content-Length") or 0)
+                try:
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                res = approve_job(slug, cfg, (payload or {}).get("note", ""))
+                return self._json(res, 200 if res.get("approved") else 400)
             if parsed.path == "/api/jobs":
                 length = int(self.headers.get("Content-Length") or 0)
                 try:
@@ -336,7 +358,8 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
                 opts = {k: payload.get(k) for k in
                         ("duration_sec", "aspect", "style", "video_backend",
                          "audio_backend", "voice_name", "captions", "caption_backend",
-                         "supervisor_backend", "language", "resolution")
+                         "supervisor_backend", "language", "resolution",
+                         "skill", "custom_instructions", "assembler")
                         if payload.get(k) not in (None, "")}
                 if isinstance(opts.get("duration_sec"), str):
                     try:

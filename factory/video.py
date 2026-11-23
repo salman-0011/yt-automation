@@ -99,20 +99,73 @@ def assemble(job_dir: Path, kind: str = "short") -> tuple[bool, str]:
         return False, f"Assemble error: {e}"
 
 
+def assemble_with_moviepy(job_dir: Path, clips: list, audio_path,
+                          options, config=None) -> tuple[bool, object, str]:
+    """Timeline assembly with MoviePy 2.x (CPU only — no GPU needed).
+
+    MoviePy builds every frame in Python, so it is MUCH slower than
+    FFmpeg for the same video (a 15-second slideshow took ~8 minutes
+    on one CPU in published measurements). It is kept as a pluggable
+    option for timeline work (cuts / ordering / fades) where Python
+    control matters, not as the default. No TextClip / ImageMagick is
+    used (Pillow makes the text), and no subtitles are burned in here
+    — if captions are requested, the caller uses FFmpeg instead.
+    Returns (ok, output_path_or_None, message).
+    """
+    job_dir = Path(job_dir)
+    try:
+        from moviepy import AudioFileClip, VideoFileClip, concatenate_videoclips  # type: ignore
+    except ImportError:
+        return False, None, "MoviePy is not installed (pip install moviepy)."
+    if not clips:
+        return False, None, "No scene clips to assemble."
+    out = job_dir / f"output-{options.kind}.mp4"
+    try:
+        video_clips = [VideoFileClip(str(c)) for c in clips]
+        final = concatenate_videoclips(video_clips, method="compose")
+        if audio_path and Path(audio_path).exists():
+            final = final.with_audio(AudioFileClip(str(audio_path)))
+        final = final.with_duration(float(options.duration_sec))
+        final.write_videofile(str(out), codec="libx264", audio_codec="aac",
+                              fps=FPS, preset="veryfast", threads=2,
+                              logger=None)
+        for c in video_clips:
+            c.close()
+        if out.exists() and out.stat().st_size > 0:
+            return True, out, (f"Assembled with MoviePy: {out} "
+                               f"({options.size}, libx264, captions=no)")
+        return False, None, "MoviePy assemble produced no output."
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"MoviePy assemble failed: {e}"
+
+
 def assemble_auto(job_dir: Path, clips: list, audio_path, caption_path,
                   options, config=None) -> tuple[bool, object, str]:
     """Assemble auto-rendered scene clips + narration + captions into one mp4.
 
-    Returns (ok, output_path_or_None, message). Uses the concat demuxer
-    for the scene clips, the narration mp3 as the single audio track
-    (looped/padded to the video length), burned-in subtitles when a
-    captions file is given, and loudnorm -14 LUFS. Encoder: Quick Sync
+    Returns (ok, output_path_or_None, message). Assembler: FFmpeg by
+    default (fast, burned-in subtitles, loudnorm -14 LUFS); MoviePy
+    only when options.assembler == "moviepy" AND no captions are
+    requested (MoviePy cannot burn in subtitles here) — otherwise the
+    run logs why FFmpeg was used instead. Encoder: Quick Sync
     if FFmpeg has it, else libx264 veryfast. 720p by default.
     """
     from .options import JobOptions  # local import: avoids a cycle at module load
     job_dir = Path(job_dir)
     options = options if isinstance(options, JobOptions) else JobOptions.from_dict(
         options if isinstance(options, dict) else {}, "short")
+    assembler = getattr(options, "assembler", "auto") or "auto"
+    if assembler == "moviepy" and not caption_path:
+        ok, out, msg = assemble_with_moviepy(job_dir, clips, audio_path, options, config)
+        if ok:
+            return ok, out, msg
+        # MoviePy failed — fall through to FFmpeg rather than failing the job.
+        msg = f"MoviePy assemble failed ({msg}) — falling back to FFmpeg."
+    elif assembler == "moviepy" and caption_path:
+        msg = ("MoviePy cannot burn in subtitles — using FFmpeg for this job "
+               "(captions are on).")
+    else:
+        msg = ""
     if not ffmpeg_path():
         return False, None, "ffmpeg not found. Install FFmpeg, then re-run."
     if not clips:
@@ -141,7 +194,7 @@ def assemble_auto(job_dir: Path, clips: list, audio_path, caption_path,
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
                            cwd=job_dir / "clips")
         if r.returncode == 0 and out.exists() and out.stat().st_size > 0:
-            return True, out, (f"Assembled: {out} "
+            return True, out, ((msg + " " if msg else "") + f"Assembled: {out} "
                                f"({options.size}, {enc}, captions="
                                f"{'yes' if caption_path else 'no'})")
         if out.exists() and out.stat().st_size == 0:

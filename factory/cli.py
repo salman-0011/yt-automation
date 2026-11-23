@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from .auto import run_job_sync
+from .auto import approve_job, run_job_sync
 from .captions import make_captions
 from .config import Config
 from .credits import CreditLedger
@@ -56,7 +56,7 @@ def _add_option_args(p: argparse.ArgumentParser) -> None:
                    help="Target duration in seconds (Short default 40, long default 540)")
     p.add_argument("--aspect", choices=["9:16", "16:9"], default=None)
     p.add_argument("--style", choices=STYLES, default=None,
-                   help="2.5d-cartoon | diagram | cinematic-code | map")
+                   help="auto (= channel default) | cinematic-realistic | 2.5d-cartoon | diagram | map")
     p.add_argument("--video-backend", choices=VIDEO_BACKENDS, default=None,
                    help="auto | code | motion-canvas | manim | flow-manual (manual only)")
     p.add_argument("--audio-backend", choices=AUDIO_BACKENDS, default=None,
@@ -65,7 +65,13 @@ def _add_option_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--captions", choices=["on", "off"], default=None)
     p.add_argument("--caption-backend", choices=CAPTION_BACKENDS, default=None)
     p.add_argument("--supervisor", choices=SUPERVISOR_BACKENDS, default=None,
-                   help="auto | gemini-api | gemini-cli | antigravity | none")
+                   help="auto | genai-sdk | gemini-api | gemini-cli | antigravity | none")
+    p.add_argument("--assembler", choices=["auto", "ffmpeg", "moviepy"], default=None,
+                   help="auto (= FFmpeg) | ffmpeg | moviepy (slower, Python timeline)")
+    p.add_argument("--skill", default=None,
+                   help="Skill to follow: auto | origin-loop-shorts | tiny-timeline-longform | <skills/*.md stem>")
+    p.add_argument("--custom", default=None,
+                   help="Per-job custom instructions (the job's own directions)")
 
 
 def _options_from_args(args) -> dict:
@@ -88,6 +94,12 @@ def _options_from_args(args) -> dict:
         opts["caption_backend"] = args.caption_backend
     if getattr(args, "supervisor", None):
         opts["supervisor_backend"] = args.supervisor
+    if getattr(args, "skill", None):
+        opts["skill"] = args.skill
+    if getattr(args, "custom", None):
+        opts["custom_instructions"] = args.custom
+    if getattr(args, "assembler", None):
+        opts["assembler"] = args.assembler
     return opts
 
 
@@ -103,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
 
     a2 = sub.add_parser("auto", help="ONE CLICK: run a job end to end and make the video")
     a2.add_argument("--job", required=True)
+    a2.add_argument("--fresh", action="store_true",
+                    help="Re-do every step instead of resuming from the last checkpoint")
     _add_option_args(a2)
+
+    ap = sub.add_parser("approve", help="Human approval for a needs-review job (marks it done + publishes to the library)")
+    ap.add_argument("--job", required=True)
+    ap.add_argument("--note", default="", help="Short note on what you reviewed")
 
     sub.add_parser("options", help="List every per-job option and which backends are installed")
 
@@ -149,20 +167,39 @@ def main(argv: list[str] | None = None) -> int:
         opts = JobOptions.from_dict(merged, job_json.get("kind", "short"))
         print(f"Auto-run: {args.job}  ({opts.kind}, {opts.duration_sec}s, "
               f"{opts.aspect}, video={opts.video_backend}, audio={opts.audio_backend}, "
-              f"supervisor={opts.supervisor_backend})")
-        res = run_job_sync(args.job, cfg, opts)
+              f"supervisor={opts.supervisor_backend}, skill={opts.skill})")
+        res = run_job_sync(args.job, cfg, opts, fresh=getattr(args, "fresh", False))
         print(res.get("message", res))
         if res.get("output"):
             print(f"Video: {res['output']}")
+        if res.get("library"):
+            print(f"Library: {res['library']['video']}")
         return 0 if res.get("status") == "done" else 1
+
+    if args.cmd == "approve":
+        _job_dir(args.job, cfg)
+        res = approve_job(args.job, cfg, args.note)
+        print(res.get("message", res))
+        if res.get("library"):
+            print(f"Library: {res['library']['video']}")
+        return 0 if res.get("approved") else 1
 
     if args.cmd == "options":
         print("Per-job options (dashboard + CLI `new` / `auto` share these):")
         print(f"  video backends:  {', '.join(VIDEO_BACKENDS)}")
         print(f"  audio backends:  {', '.join(AUDIO_BACKENDS)}  (ElevenLabs is captions only — never voice)")
         print(f"  caption backends:{', '.join(CAPTION_BACKENDS)}")
-        print(f"  supervisors:     {', '.join(SUPERVISOR_BACKENDS)}")
-        print(f"  styles:          {', '.join(STYLES)}")
+        print(f"  supervisors:     {', '.join(SUPERVISOR_BACKENDS)}  (supervisor is Muse via the Gen AI SDK agent; gemini-cli/antigravity are manual fallback only)")
+        from .options import ASSEMBLERS, detect_assemblers
+        print(f"  assemblers:      {', '.join(ASSEMBLERS)}  (auto = FFmpeg; moviepy = slower Python timeline)")
+        for name, info in detect_assemblers().items():
+            print(f"    assembler/{name}: {'available' if info['available'] else 'NOT available'} — {info['note']}")
+        print(f"  styles:          {', '.join(STYLES)}  (auto = cinematic-realistic for Shorts, 2.5d-cartoon for long-form)")
+        from .skills import list_skills
+        print("  skills (skills/*.md — pick per job with --skill):")
+        for s in list_skills():
+            print(f"    {s['name']} — {s['title']} [{s['kind']}]")
+        print("  custom instructions: --custom \"...\" (per job, honoured by the supervisor, checked in QC)")
         print("Detected on this machine:")
         for name, info in detect_video_backends().items():
             print(f"  video/{name}: {'available' if info['available'] else 'NOT available'} — {info['note']}")

@@ -46,6 +46,7 @@ class Job:
     verdict: str = "PENDING-DEMAND-CHECK"
     options: dict = field(default_factory=dict)  # JobOptions, as a dict
     run: dict = field(default_factory=dict)      # auto-run progress / result
+    angle: dict = field(default_factory=dict)    # chosen angle, one per job
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -83,6 +84,15 @@ def create_job(topic: str, kind: str, config: Config | None = None,
     (job_dir / "job.json").write_text(json.dumps(job.to_dict(), indent=2), encoding="utf-8")
     (job_dir / "options.json").write_text(json.dumps(opts.to_dict(), indent=2),
                                           encoding="utf-8")
+    # Per-job custom instructions — the job's own directions. The
+    # supervisor must honour them, and QC checks they show up.
+    (job_dir / "custom-instructions.md").write_text(
+        (opts.custom_instructions.strip()
+         or "(none — no custom instructions for this job)\n"), encoding="utf-8")
+    (job_dir / "angle.md").write_text(
+        "# Chosen angle — one angle per job\n\n(not chosen yet — the supervisor "
+        "picks the angle when the job runs, before writing the script)\n",
+        encoding="utf-8")
 
     master = P.SHORTS_V2_PROMPT if kind == SHORT else P.LONGFORM_PROMPT
     (job_dir / "prompts" / "master-prompt.md").write_text(

@@ -185,6 +185,44 @@ def render_manim(job_dir: Path, scenes: list[dict],
     return clips, "manim render failed — fell back to code. " + log
 
 
+def make_thumbnail(job_dir: Path, topic: str, angle: dict,
+                   options: JobOptions) -> Path | None:
+    """Clean thumbnail card (Pillow): topic + angle, no baked-in logos.
+
+    The 2-4 overlay words go on in CapCut (see prompts/thumbnail.md);
+    this card is the clean image the library stores.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    except ImportError:
+        return None
+    job_dir = Path(job_dir)
+    width, height = options.width, options.height
+    bg, accent = PALETTE[1]
+    img = Image.new("RGB", (width, height), bg)
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, int(height * 0.72), width, height], fill=accent)
+    try:
+        font_big = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.06))
+        font_small = ImageFont.truetype("DejaVuSans.ttf", int(height * 0.032))
+    except Exception:
+        font_big = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    wrap = max(8, width // (int(height * 0.06) // 2 + 1))
+    lines = textwrap.wrap(topic, width=wrap)[:4]
+    y = int(height * 0.12)
+    for line in lines:
+        d.text((width * 0.07, y), line, font=font_big, fill=(255, 255, 255))
+        y += int(height * 0.08)
+    angle_line = (angle or {}).get("thumbnail_angle", "") or (angle or {}).get("angle", "")
+    for line in textwrap.wrap(angle_line, width=wrap + 10)[:2]:
+        d.text((width * 0.07, y), line, font=font_small, fill=(255, 255, 255))
+        y += int(height * 0.05)
+    out = job_dir / "thumbnail.jpg"
+    img.save(out)
+    return out
+
+
 def render_visuals(job_dir: Path, scenes: list[dict], options: JobOptions,
                    ) -> tuple[list[Path], str, str]:
     """Return (scene clips, backend_actually_used, log line)."""

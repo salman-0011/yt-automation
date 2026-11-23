@@ -1,14 +1,16 @@
-# Core (required) — stdlib only for the CLI + dashboard fallback.
+# Core (required) — the CLI + dashboard fallback run on stdlib only,
+# but the supervisor agent + Charon TTS need the Gen AI SDK.
 # FastAPI/uvicorn are optional: without them the dashboard still runs
 # on the Python stdlib server (same /api/* routes, same pages).
 fastapi>=0.110
 uvicorn>=0.29
 python-dotenv>=1.0
 Pillow>=10.0
+google-genai>=1.0   # Muse supervisor agent (tool-calling) + Gemini TTS Charon
 
 # Optional — install only what you use. All are guarded in code:
 # faster-whisper (local CPU captions): pip install faster-whisper
-# google-genai (Gemini TTS / Charon via API): pip install google-genai
-# manim (mechanism animation, 720p): pip install manim
+# moviepy (optional timeline assembler, CPU, slower than FFmpeg): pip install moviepy
+# manim (mechanism animation, 720p, CPU): pip install manim
 # kokoro (local CPU TTS, draft voice): pip install kokoro soundfile
 # piper-tts (local CPU TTS, draft voice): pip install piper-tts
