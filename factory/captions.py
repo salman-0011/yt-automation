@@ -34,8 +34,10 @@ def srt_from_script(script: str, wpm: int = 152) -> str:
         dur = max(1.0, len(sent.split()) / wpm * 60.0)
         cues.append(f"{i}\n{_srt_time(t)} --> {_srt_time(t + dur)}\n{sent}\n")
         t += dur + 0.2
-    header = "NOTE: estimated timings from script word count. Replace with faster-whisper output after voice render.\n\n"
-    return header + "\n".join(cues)
+    # Pure SRT only — no NOTE header line: FFmpeg's subtitles filter
+    # (libass) refuses to open an SRT whose first line is not a cue
+    # number. The "estimated" warning lives in captions-note.txt instead.
+    return "\n".join(cues)
 
 
 def transcribe_with_faster_whisper(audio_path: Path, out_srt: Path,
@@ -68,4 +70,9 @@ def make_captions(job_dir: Path, script: str,
     if audio_path and transcribe_with_faster_whisper(audio_path, out):
         return out
     out.write_text(srt_from_script(script, cfg.voice_wpm), encoding="utf-8")
+    (Path(job_dir) / "captions-note.txt").write_text(
+        "NOTE: these timings are estimated from script word count. "
+        "Replace with faster-whisper output after voice render, and "
+        "hand-correct in CapCut — never trust auto-captions blindly.\n",
+        encoding="utf-8")
     return out

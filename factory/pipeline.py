@@ -2,16 +2,16 @@
 -> voice -> visuals -> captions -> assemble -> QC.
 
 This module creates the job folder and all the prompt/template files.
-It does NOT generate video, voice or script text by itself: the human +
-Gemini CLI / Muse write the script using prompts.py, the human generates
-Omni Flash clips in Flow, and FFmpeg assembles locally. That honesty is
-the point — no step is faked.
+The auto-runner (factory/auto.py) is what actually generates the
+video: supervisor plans, audio/video backends render, FFmpeg assembles.
+Flow / Nano Banana still have no public API — their prompts stay
+manual-only. That honesty is the point — no step is faked.
 """
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 from . import prompts as P
@@ -44,6 +44,8 @@ class Job:
     channel: str
     status: str = "created"
     verdict: str = "PENDING-DEMAND-CHECK"
+    options: dict = field(default_factory=dict)  # JobOptions, as a dict
+    run: dict = field(default_factory=dict)      # auto-run progress / result
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -54,11 +56,21 @@ def slugify(topic: str) -> str:
     return slug[:60] or "untitled"
 
 
-def create_job(topic: str, kind: str, config: Config | None = None) -> tuple[Job, Path]:
+def create_job(topic: str, kind: str, config: Config | None = None,
+               options: dict | None = None) -> tuple[Job, Path]:
     cfg = config or Config()
     kind = kind.lower()
     if kind not in (SHORT, LONG):
         raise ValueError("kind must be 'short' or 'long'")
+    from .options import JobOptions
+    opts = JobOptions.from_dict(options, kind)
+    # .env defaults apply only when the caller did not choose a backend.
+    if not (options or {}).get("video_backend"):
+        opts.video_backend = cfg.default_video_backend
+    if not (options or {}).get("audio_backend"):
+        opts.audio_backend = cfg.default_audio_backend
+    if not (options or {}).get("supervisor_backend"):
+        opts.supervisor_backend = cfg.default_supervisor_backend
     channel = cfg.shorts_channel if kind == SHORT else cfg.longform_channel
     slug = slugify(topic)
     job_dir = cfg.jobs_dir / slug
@@ -66,8 +78,11 @@ def create_job(topic: str, kind: str, config: Config | None = None) -> tuple[Job
     for sub in ("clips", "voice", "stills", "prompts"):
         (job_dir / sub).mkdir(exist_ok=True)
 
-    job = Job(slug=slug, topic=topic, kind=kind, channel=channel)
+    job = Job(slug=slug, topic=topic, kind=kind, channel=channel,
+              options=opts.to_dict())
     (job_dir / "job.json").write_text(json.dumps(job.to_dict(), indent=2), encoding="utf-8")
+    (job_dir / "options.json").write_text(json.dumps(opts.to_dict(), indent=2),
+                                          encoding="utf-8")
 
     master = P.SHORTS_V2_PROMPT if kind == SHORT else P.LONGFORM_PROMPT
     (job_dir / "prompts" / "master-prompt.md").write_text(

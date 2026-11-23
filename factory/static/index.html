@@ -14,30 +14,45 @@
   .stat{background:#0f172a;border-radius:10px;padding:12px}.stat b{font-size:24px;display:block}.stat span{color:#94a3b8;font-size:13px}
   table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:8px;border-bottom:1px solid #334155;font-size:14px}
   button{background:#0ea5e9;color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer;font-size:14px}
-  button:hover{background:#0284c7} input,select{padding:9px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;width:100%}
-  .form{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px;align-items:end}
+  button:hover{background:#0284c7} button.run{background:#16a34a} button.run:hover{background:#15803d}
+  button:disabled{background:#475569;cursor:default}
+  input,select{padding:9px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;width:100%}
+  .form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end}
   .card{background:#0f172a;border-radius:10px;padding:12px;margin-bottom:8px}
   .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#334155}
   .badge.ok{background:#166534}.badge.warn{background:#92400e}.badge.manual{background:#1e40af}
   .muted{color:#94a3b8;font-size:13px} a{color:#38bdf8}
+  .bar{height:10px;background:#0f172a;border-radius:99px;overflow:hidden;margin:6px 0}
+  .bar>div{height:100%;background:#16a34a}
+  label{font-size:13px;color:#94a3b8} label input, label select{margin-top:4px}
+  .check{display:flex;align-items:center;gap:8px} .check input{width:auto}
   @media(max-width:700px){.form{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <header>
   <h1>🎬 YT Production Factory</h1>
-  <p>Origin Loop — Shorts only &nbsp;•&nbsp; Tiny Timeline Lab — Long-form 8–10 min &nbsp;•&nbsp; CPU-first, Omni Flash only, Charon voice</p>
+  <p>Origin Loop — Shorts only &nbsp;•&nbsp; Tiny Timeline Lab — Long-form 8–10 min &nbsp;•&nbsp; One click = Run, the supervisor + Python backends make the video</p>
 </header>
 <main>
   <section>
-    <h2>New job</h2>
+    <h2>New job — every option is yours</h2>
     <div class="form">
       <label>Topic <input id="topic" placeholder="e.g. How 70 warships sailed over dry land"></label>
       <label>Type <select id="kind"><option value="short">Short (Origin Loop)</option><option value="long">Long-form (Tiny Timeline Lab)</option></select></label>
-      <label>Channel <input id="channel" value="auto from type" disabled></label>
+      <label>Duration (sec) <input id="duration" type="number" value="40" min="15" max="3600"></label>
+      <label>Aspect <select id="aspect"><option value="auto">Auto (9:16 Short / 16:9 long)</option><option value="9:16">9:16 vertical</option><option value="16:9">16:9 horizontal</option></select></label>
+      <label>Style <select id="style"><option value="2.5d-cartoon">2.5D cartoon</option><option value="diagram">Diagram</option><option value="cinematic-code">Cinematic (code visuals)</option><option value="map">Map</option></select></label>
+      <label>Video backend <select id="video_backend"><option value="auto">Auto (best available)</option><option value="code">Code — Pillow + FFmpeg (always works)</option><option value="motion-canvas">Motion Canvas</option><option value="manim">Manim</option><option value="flow-manual">Flow — manual only (no auto video)</option></select></label>
+      <label>Audio backend <select id="audio_backend"><option value="auto">Auto (best available)</option><option value="gemini-tts">Gemini TTS — Charon</option><option value="kokoro">Kokoro (local, draft)</option><option value="piper">Piper (local, draft)</option><option value="existing">Existing voice/*.mp3</option></select></label>
+      <label>Voice <input id="voice_name" value="Charon"></label>
+      <label>Captions backend <select id="caption_backend"><option value="auto">Auto</option><option value="faster-whisper">faster-whisper (CPU)</option><option value="script-srt">Script SRT (timed from script)</option><option value="off">Off</option></select></label>
+      <label>Supervisor <select id="supervisor_backend"><option value="auto">Auto (Gemini API if key set)</option><option value="gemini-api">Gemini API</option><option value="gemini-cli">Gemini CLI</option><option value="antigravity">AntiGravity CLI</option><option value="none">None — use my script.md</option></select></label>
+      <label class="check"><input id="captions" type="checkbox" checked> Captions on</label>
       <button onclick="createJob()">Create job</button>
     </div>
-    <p class="muted" id="newmsg">Creates jobs/&lt;slug&gt;/ with demand-check, master prompt, script + storyboard templates, Flow prompts and the pre-publish checklist. No video is generated automatically — Flow / Nano Banana have no public API.</p>
+    <p class="muted" id="newmsg">Creates jobs/&lt;slug&gt;/ with your options saved in options.json. Then press <b>Run</b> on the job — one click, the supervisor plans it and the backends render it. Flow / Nano Banana have no public API, so they stay manual-only.</p>
+    <p class="muted" id="detected"></p>
   </section>
 
   <section>
@@ -53,7 +68,7 @@
 
   <section>
     <h2>Job detail</h2>
-    <div id="detail"><p class="muted">Click a job above to see its step-by-step files, clips and credits.</p></div>
+    <div id="detail"><p class="muted">Click a job above to see its options, run progress, step-by-step files, clips and credits.</p></div>
   </section>
 
   <section>
@@ -66,30 +81,67 @@
 async function j(u, o){ const r = await fetch(u, o); return r.json(); }
 function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+async function loadOptions(){
+  try{
+    const o = await j('/api/options');
+    const det = [];
+    for (const [k,v] of Object.entries(o.detected.video)) det.push('video/' + k + ': ' + (v.available ? 'yes' : 'no'));
+    for (const [k,v] of Object.entries(o.detected.audio)) det.push('audio/' + k + ': ' + (v.available ? 'yes' : 'no'));
+    for (const [k,v] of Object.entries(o.detected.supervisor)) det.push('supervisor/' + k + ': ' + (v.available ? 'yes' : 'no'));
+    document.getElementById('detected').textContent = 'Detected on this machine — ' + det.join(' • ');
+  }catch(e){}
+}
+
 async function createJob(){
   const topic = document.getElementById('topic').value.trim();
   const kind = document.getElementById('kind').value;
   if(!topic){ document.getElementById('newmsg').textContent = 'Please type a topic first.'; return; }
-  const res = await j('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({topic, kind})});
+  const body = {topic, kind,
+    duration_sec: parseInt(document.getElementById('duration').value, 10) || undefined,
+    aspect: document.getElementById('aspect').value,
+    style: document.getElementById('style').value,
+    video_backend: document.getElementById('video_backend').value,
+    audio_backend: document.getElementById('audio_backend').value,
+    voice_name: document.getElementById('voice_name').value || 'Charon',
+    captions: document.getElementById('captions').checked,
+    caption_backend: document.getElementById('caption_backend').value,
+    supervisor_backend: document.getElementById('supervisor_backend').value};
+  const res = await j('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   if(res.error){ document.getElementById('newmsg').textContent = 'Error: ' + res.error; return; }
-  document.getElementById('newmsg').textContent = 'Created: ' + res.job.slug + ' in ' + res.path;
+  document.getElementById('newmsg').textContent = 'Created: ' + res.job.slug + ' in ' + res.path + ' — now press Run on it below.';
   document.getElementById('topic').value = '';
+  refresh();
+}
+
+async function runJob(slug){
+  const res = await j('/api/jobs/' + encodeURIComponent(slug) + '/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+  if(res.error){ alert('Error: ' + res.error); return; }
+  if(!res.started){ alert(res.message || 'Run did not start.'); return; }
+  showJob(slug);
   refresh();
 }
 
 async function showJob(slug){
   const job = await j('/api/jobs/' + encodeURIComponent(slug));
   if(job.error){ document.getElementById('detail').textContent = job.error; return; }
-  const steps = ['01-demand-check','02-research','03-script','04-storyboard','05-voice','06-visuals','07-captions','08-assemble','09-qc-pre-publish-gate'];
+  const run = job.run || {};
+  const steps = ['01-plan-supervisor','02-research','03-script','04-storyboard','05-voice','06-visuals','07-captions','08-assemble','09-qc'];
+  const opts = job.options || {};
   document.getElementById('detail').innerHTML =
     '<div class="card"><b>' + esc(job.topic) + '</b> <span class="badge">' + esc(job.kind) + '</span> ' +
     '<span class="badge">' + esc(job.channel) + '</span><br><span class="muted">slug: ' + esc(job.slug) +
     ' • status: ' + esc(job.status) + ' • verdict: ' + esc(job.verdict) +
     ' • clips: ' + (job.clips||0) + ' • output video: ' + (job.has_output ? 'yes' : 'not yet') + '</span>' +
+    '<p><b>Options</b> <span class="muted">' + esc(JSON.stringify(opts)) + '</span></p>' +
+    '<p><b>Run</b> — ' + esc(run.step || 'not run yet') + ' • ' + (run.progress||0) + '% • ' + esc(run.message || '') + '</p>' +
+    '<div class="bar"><div style="width:' + (run.progress||0) + '%"></div></div>' +
+    (run.output ? '<p>Output: <span class="muted">' + esc(run.output) + '</span></p>' : '') +
+    '<button class="run" onclick="runJob(\'' + esc(job.slug) + '\')">▶ Run automatically</button> ' +
+    '<span class="muted">One click — supervisor + backends make the video. See run-log.md in the job folder for the full log.</span>' +
     '<p><b>Pipeline steps</b></p><ol>' + steps.map(s => '<li>' + s + '</li>').join('') + '</ol>' +
     '<p><b>Files produced (' + (job.file_count||0) + ')</b></p><p class="muted">' +
     (job.files||[]).map(esc).join('<br>') + '</p>' +
-    '<p><b>Credits for this job</b>: ' + (job.kind === 'short' ? '~120 Omni Flash credits (40s × 3/sec)' : '~450 primary + 144 retake reserve = 594 max') + '</p></div>';
+    '<p><b>Credits for this job</b>: auto visuals cost 0 Omni Flash credits. ' + (job.kind === 'short' ? 'Manual Flow clips would be ~120 credits (40s × 3/sec).' : 'Manual Flow clips would be ~450 primary + 144 reserve = 594 max.') + '</p></div>';
 }
 
 async function refresh(){
@@ -107,12 +159,12 @@ async function refresh(){
     ];
     document.getElementById('stats').innerHTML = stats.map(([k,v]) => '<div class="stat"><b>' + v + '</b><span>' + k + '</span></div>').join('');
     document.getElementById('credits').textContent =
-      'One 40s Short ≈ ' + (cred.short_estimate||120) + ' credits. One 9-min long-form ≈ ' +
+      'One 40s Short ≈ ' + (cred.short_estimate||120) + ' credits if you use manual Flow clips (auto visuals: 0). One 9-min long-form ≈ ' +
       (cred.long_estimate ? cred.long_estimate.primary + ' primary + ' + cred.long_estimate.retake_reserve + ' reserve = ' + cred.long_estimate.max + ' max' : '594 max') +
       '. Each account: 1000 starting + 50/day.';
     document.getElementById('updated').textContent = '— updated ' + new Date().toLocaleTimeString();
-    document.getElementById('jobs').innerHTML = jobs.length ? '<table><tr><th>Topic</th><th>Type</th><th>Channel</th><th>Status</th><th>Clips</th><th>Output</th><th></th></tr>' +
-      jobs.map(x => '<tr><td>' + esc(x.topic) + '</td><td>' + esc(x.kind) + '</td><td>' + esc(x.channel) + '</td><td>' + esc(x.status) + '</td><td>' + (x.clips||0) + '</td><td>' + (x.has_output ? 'yes' : 'no') + '</td><td><button onclick="showJob(\'' + esc(x.slug) + '\')">Detail</button></td></tr>').join('') + '</table>'
+    document.getElementById('jobs').innerHTML = jobs.length ? '<table><tr><th>Topic</th><th>Type</th><th>Channel</th><th>Status</th><th>Run</th><th>Output</th><th></th></tr>' +
+      jobs.map(x => { const r = x.run || {}; return '<tr><td>' + esc(x.topic) + '</td><td>' + esc(x.kind) + '</td><td>' + esc(x.channel) + '</td><td>' + esc(x.status) + '</td><td>' + esc(r.step || '—') + ' ' + (r.progress||0) + '%</td><td>' + (x.has_output ? 'yes' : 'no') + '</td><td><button onclick="showJob(\'' + esc(x.slug) + '\')">Detail</button> <button class="run" onclick="runJob(\'' + esc(x.slug) + '\')">▶ Run</button></td></tr>'; }).join('') + '</table>'
       : '<p class="muted">No jobs yet — create one above.</p>';
     document.getElementById('tools').innerHTML = (toolsRes.tools||[]).map(t => {
       const cls = t.status === 'installed' || t.status === 'configured' ? 'ok' : (t.status === 'manual' ? 'manual' : 'warn');
@@ -121,9 +173,9 @@ async function refresh(){
   }catch(e){ document.getElementById('jobs').innerHTML = '<p class="muted">Backend not reachable: ' + esc(e.message) + '</p>'; }
 }
 document.getElementById('kind').addEventListener('change', e => {
-  document.getElementById('channel').value = e.target.value === 'short' ? 'Origin Loop' : 'Tiny Timeline Lab';
+  document.getElementById('duration').value = e.target.value === 'short' ? 40 : 540;
 });
-document.getElementById('channel').value = 'Origin Loop';
+loadOptions();
 refresh();
 setInterval(refresh, 3000);
 </script>

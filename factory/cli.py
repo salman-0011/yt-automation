@@ -2,6 +2,11 @@
 
 Commands:
   new --type short|long --topic "..."   create a job folder + prompts
+  auto --job slug [--video-backend ...] [--audio-backend ...] [--duration N]
+       [--aspect 9:16|16:9] [--style ...] [--captions on|off]
+       ONE CLICK: supervisor plans, backends render, FFmpeg assembles.
+       Finished video: jobs/<slug>/output-<type>.mp4
+  options                               list every per-job option + what is installed
   status [--job slug]                   list jobs / show one job
   credits                               show balances + estimates
   voice --job slug                       write Charon act files / try Gemini TTS
@@ -17,9 +22,14 @@ import json
 import sys
 from pathlib import Path
 
+from .auto import run_job_sync
 from .captions import make_captions
 from .config import Config
 from .credits import CreditLedger
+from .options import (AUDIO_BACKENDS, CAPTION_BACKENDS, STYLES,
+                      SUPERVISOR_BACKENDS, VIDEO_BACKENDS, JobOptions,
+                      detect_audio_backends, detect_supervisor_backends,
+                      detect_video_backends)
 from .pipeline import create_job, credit_warning
 from .server import list_jobs, run_server
 from .supervisor import run_supervisor_check
@@ -40,6 +50,47 @@ def _read_script(job_dir: Path) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
+def _add_option_args(p: argparse.ArgumentParser) -> None:
+    """Every per-job option, shared by `new` and `auto`."""
+    p.add_argument("--duration", type=int, default=None,
+                   help="Target duration in seconds (Short default 40, long default 540)")
+    p.add_argument("--aspect", choices=["9:16", "16:9"], default=None)
+    p.add_argument("--style", choices=STYLES, default=None,
+                   help="2.5d-cartoon | diagram | cinematic-code | map")
+    p.add_argument("--video-backend", choices=VIDEO_BACKENDS, default=None,
+                   help="auto | code | motion-canvas | manim | flow-manual (manual only)")
+    p.add_argument("--audio-backend", choices=AUDIO_BACKENDS, default=None,
+                   help="auto | gemini-tts (Charon) | kokoro | piper | existing")
+    p.add_argument("--voice", default=None, help="Voice name (default Charon)")
+    p.add_argument("--captions", choices=["on", "off"], default=None)
+    p.add_argument("--caption-backend", choices=CAPTION_BACKENDS, default=None)
+    p.add_argument("--supervisor", choices=SUPERVISOR_BACKENDS, default=None,
+                   help="auto | gemini-api | gemini-cli | antigravity | none")
+
+
+def _options_from_args(args) -> dict:
+    opts: dict = {}
+    if getattr(args, "duration", None):
+        opts["duration_sec"] = args.duration
+    if getattr(args, "aspect", None):
+        opts["aspect"] = args.aspect
+    if getattr(args, "style", None):
+        opts["style"] = args.style
+    if getattr(args, "video_backend", None):
+        opts["video_backend"] = args.video_backend
+    if getattr(args, "audio_backend", None):
+        opts["audio_backend"] = args.audio_backend
+    if getattr(args, "voice", None):
+        opts["voice_name"] = args.voice
+    if getattr(args, "captions", None):
+        opts["captions"] = args.captions == "on"
+    if getattr(args, "caption_backend", None):
+        opts["caption_backend"] = args.caption_backend
+    if getattr(args, "supervisor", None):
+        opts["supervisor_backend"] = args.supervisor
+    return opts
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory.cli",
                                 description="YT Production Factory — Origin Loop + Tiny Timeline Lab")
@@ -48,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     n = sub.add_parser("new", help="Create a new job")
     n.add_argument("--type", choices=["short", "long"], required=True)
     n.add_argument("--topic", required=True, help='Topic, e.g. "How 70 warships sailed over dry land"')
+    _add_option_args(n)
+
+    a2 = sub.add_parser("auto", help="ONE CLICK: run a job end to end and make the video")
+    a2.add_argument("--job", required=True)
+    _add_option_args(a2)
+
+    sub.add_parser("options", help="List every per-job option and which backends are installed")
 
     s = sub.add_parser("status", help="List jobs or show one job")
     s.add_argument("--job", default=None)
@@ -73,14 +131,45 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config()
 
     if args.cmd == "new":
-        job, job_dir = create_job(args.topic, args.type, cfg)
+        job, job_dir = create_job(args.topic, args.type, cfg, _options_from_args(args))
         print(f"Job created: {job.slug}")
         print(f"  Channel: {job.channel} ({job.kind})")
         print(f"  Folder:  {job_dir}")
+        print(f"  Options: {job.options}")
         print(f"  {credit_warning(args.type, cfg)}")
-        print("  Next: 1) fill prompts/demand-check.md  2) write script.md")
-        print("       3) paste scene prompts from prompts/flow-prompts.txt into Flow")
-        print("       4) python -m factory.cli assemble --job " + job.slug)
+        print("  One click: python -m factory.cli auto --job " + job.slug)
+        print("  Or open the dashboard and press Run on this job.")
+        return 0
+
+    if args.cmd == "auto":
+        job_dir = _job_dir(args.job, cfg)
+        job_json = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+        merged = dict(job_json.get("options") or {})
+        merged.update(_options_from_args(args))
+        opts = JobOptions.from_dict(merged, job_json.get("kind", "short"))
+        print(f"Auto-run: {args.job}  ({opts.kind}, {opts.duration_sec}s, "
+              f"{opts.aspect}, video={opts.video_backend}, audio={opts.audio_backend}, "
+              f"supervisor={opts.supervisor_backend})")
+        res = run_job_sync(args.job, cfg, opts)
+        print(res.get("message", res))
+        if res.get("output"):
+            print(f"Video: {res['output']}")
+        return 0 if res.get("status") == "done" else 1
+
+    if args.cmd == "options":
+        print("Per-job options (dashboard + CLI `new` / `auto` share these):")
+        print(f"  video backends:  {', '.join(VIDEO_BACKENDS)}")
+        print(f"  audio backends:  {', '.join(AUDIO_BACKENDS)}  (ElevenLabs is captions only — never voice)")
+        print(f"  caption backends:{', '.join(CAPTION_BACKENDS)}")
+        print(f"  supervisors:     {', '.join(SUPERVISOR_BACKENDS)}")
+        print(f"  styles:          {', '.join(STYLES)}")
+        print("Detected on this machine:")
+        for name, info in detect_video_backends().items():
+            print(f"  video/{name}: {'available' if info['available'] else 'NOT available'} — {info['note']}")
+        for name, info in detect_audio_backends(cfg.gemini_api_key).items():
+            print(f"  audio/{name}: {'available' if info['available'] else 'NOT available'} — {info['note']}")
+        for name, info in detect_supervisor_backends(cfg.gemini_api_key, cfg.gemini_cli, cfg.antigravity_cli).items():
+            print(f"  supervisor/{name}: {'available' if info['available'] else 'NOT available'} — {info['note']}")
         return 0
 
     if args.cmd == "status":

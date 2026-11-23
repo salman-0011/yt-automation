@@ -6,7 +6,10 @@ Serves:
   GET  /api/jobs/<slug> -> one job + its files + credit estimate
   GET  /api/credits -> balances + estimates
   GET  /api/tools  -> tool status (installed / configured / manual-only)
-  POST /api/jobs   -> create a new job (topic, kind)
+  GET  /api/options -> every per-job option + live backend detection
+  POST /api/jobs   -> create a new job (topic, kind, + all options)
+  POST /api/jobs/<slug>/run -> ONE CLICK: start the auto-run in background
+  GET  /api/jobs/<slug>/run -> live run progress (step, %, message, output)
   GET  /api/health -> {"ok": true}
 
 Live updates: the dashboard polls /api/jobs every 3 seconds (simple,
@@ -19,8 +22,13 @@ import json
 import os
 from pathlib import Path
 
+from .auto import run_job_async, run_status
 from .config import Config
 from .credits import CreditLedger
+from .options import (AUDIO_BACKENDS, CAPTION_BACKENDS, STYLES, ASPECTS,
+                      SUPERVISOR_BACKENDS, VIDEO_BACKENDS, JobOptions,
+                      detect_audio_backends, detect_supervisor_backends,
+                      detect_video_backends)
 from .pipeline import create_job
 
 try:
@@ -59,13 +67,40 @@ def list_jobs(config: Config | None = None) -> list[dict]:
     return jobs
 
 
+def options_payload(config: Config | None = None) -> dict:
+    """Everything the dashboard lets the user choose, with live detection."""
+    cfg = config or Config()
+    return {
+        "kinds": ["short", "long"],
+        "aspects": ASPECTS,
+        "styles": STYLES,
+        "video_backends": VIDEO_BACKENDS,
+        "audio_backends": AUDIO_BACKENDS,
+        "caption_backends": CAPTION_BACKENDS,
+        "supervisor_backends": SUPERVISOR_BACKENDS,
+        "detected": {
+            "video": detect_video_backends(),
+            "audio": detect_audio_backends(cfg.gemini_api_key),
+            "supervisor": detect_supervisor_backends(
+                cfg.gemini_api_key, cfg.gemini_cli, cfg.antigravity_cli),
+        },
+        "defaults": JobOptions(kind="short").to_dict(),
+        "defaults_long": JobOptions(kind="long").to_dict(),
+    }
+
+
 def tool_status(config: Config | None = None) -> list[dict]:
     """Honest status per tool. 'manual' = no public API, human opens it."""
     import shutil
 
     cfg = config or Config()
     ffmpeg = shutil.which("ffmpeg") is not None
+    detected_video = detect_video_backends()
+    detected_audio = detect_audio_backends(cfg.gemini_api_key)
     return [
+        {"name": "Supervisor (Gemini API)", "kind": "supervisor",
+         "status": "configured" if cfg.gemini_api_key else "not-configured",
+         "note": "Central Project Manager. Plans the job + writes the script. Needs GEMINI_API_KEY."},
         {"name": "Gemini CLI", "kind": "supervisor",
          "status": "installed" if shutil.which(cfg.gemini_cli) else "not-installed",
          "note": "LLM supervisor. Run `gemini` in terminal, or use Tools card."},
@@ -78,17 +113,26 @@ def tool_status(config: Config | None = None) -> list[dict]:
          "note": "3 credits/sec at 720p, inside Flow. Check Flow cost screen first."},
         {"name": "Nano Banana", "kind": "thumbnail", "status": "manual",
          "note": "NO public API. Clean image only, text added in CapCut."},
-        {"name": "Charon TTS (Google AI Studio)", "kind": "voice",
+        {"name": "Auto visuals — code (Pillow + FFmpeg)", "kind": "video",
+         "status": "installed" if detected_video["code"]["available"] else "not-installed",
+         "note": "Scene cards + kinetic text + Ken Burns zoom. 0 Flow credits."},
+        {"name": "Charon TTS (Gemini API)", "kind": "voice",
          "status": "configured" if cfg.gemini_api_key else "manual",
          "note": "Voice = Charon always. API if GEMINI_API_KEY set, else AI Studio by hand."},
+        {"name": "Kokoro TTS (local, draft voice)", "kind": "voice",
+         "status": "installed" if detected_audio["kokoro"]["available"] else "not-installed",
+         "note": "Local CPU. Draft only — will NOT match Charon."},
+        {"name": "Piper TTS (local, draft voice)", "kind": "voice",
+         "status": "installed" if detected_audio["piper"]["available"] else "not-installed",
+         "note": "Local CPU, offline. Draft only — will NOT match Charon."},
         {"name": "ElevenLabs captions", "kind": "captions",
          "status": "configured" if cfg.elevenlabs_api_key else "not-configured",
          "note": "Captions ONLY, never voice. Local faster-whisper is the default."},
         {"name": "Motion Canvas", "kind": "animation",
-         "status": "installed" if shutil.which("motion-canvas") else "not-installed",
+         "status": "installed" if detected_video["motion-canvas"]["available"] else "not-installed",
          "note": "2.5D cartoon / diagram motion. Needs Node + npm; scaffold in jobs/<job>/animation/."},
         {"name": "Manim", "kind": "animation",
-         "status": "installed" if shutil.which("manim") else "not-installed",
+         "status": "installed" if detected_video["manim"]["available"] else "not-installed",
          "note": "Mechanism animations, 720p on this laptop."},
         {"name": "faster-whisper", "kind": "captions",
          "status": "installed" if _has("faster_whisper") else "not-installed",
@@ -117,7 +161,34 @@ def create_app(config: Config | None = None):
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": "1.0.0"}
+        return {"ok": True, "version": "2.0.0"}
+
+    @app.get("/api/options")
+    def options():
+        return options_payload(cfg)
+
+    @app.post("/api/jobs/{slug}/run")
+    def run_job(slug: str, payload: dict | None = None):
+        job_dir = cfg.jobs_dir / slug
+        if not job_dir.exists():
+            return JSONResponse({"error": f"job not found: {slug}"}, status_code=404)
+        opts = None
+        if payload:
+            job_json = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+            merged = dict(job_json.get("options") or {})
+            merged.update({k: v for k, v in payload.items() if v not in (None, "")})
+            opts = JobOptions.from_dict(merged, job_json.get("kind", "short"))
+            (job_dir / "options.json").write_text(json.dumps(opts.to_dict(), indent=2),
+                                                  encoding="utf-8")
+            job_json["options"] = opts.to_dict()
+            (job_dir / "job.json").write_text(json.dumps(job_json, indent=2),
+                                              encoding="utf-8")
+        res = run_job_async(slug, cfg, opts)
+        return res if res.get("started") else JSONResponse(res, status_code=409)
+
+    @app.get("/api/jobs/{slug}/run")
+    def run_progress(slug: str):
+        return run_status(slug, cfg)
 
     @app.get("/api/jobs")
     def jobs():
@@ -149,7 +220,17 @@ def create_app(config: Config | None = None):
             return JSONResponse({"error": "topic is required"}, status_code=400)
         if kind not in ("short", "long"):
             return JSONResponse({"error": "kind must be short or long"}, status_code=400)
-        job, job_dir = create_job(topic, kind, cfg)
+        opts = {k: payload.get(k) for k in
+                ("duration_sec", "aspect", "style", "video_backend",
+                 "audio_backend", "voice_name", "captions", "caption_backend",
+                 "supervisor_backend", "language", "resolution")
+                if payload.get(k) not in (None, "")}
+        if isinstance(opts.get("duration_sec"), str):
+            try:
+                opts["duration_sec"] = int(opts["duration_sec"])
+            except ValueError:
+                opts.pop("duration_sec")
+        job, job_dir = create_job(topic, kind, cfg, opts)
         return {"job": job.to_dict(), "path": str(job_dir)}
 
     if STATIC_DIR.exists():
@@ -187,9 +268,14 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/health":
-                return self._json({"ok": True, "version": "1.0.0"})
+                return self._json({"ok": True, "version": "2.0.0"})
+            if parsed.path == "/api/options":
+                return self._json(options_payload(cfg))
             if parsed.path == "/api/jobs":
                 return self._json({"jobs": list_jobs(cfg)})
+            if parsed.path.endswith("/run") and parsed.path.startswith("/api/jobs/"):
+                slug = parsed.path.split("/")[-2]
+                return self._json(run_status(slug, cfg))
             if parsed.path.startswith("/api/jobs/"):
                 slug = parsed.path.split("/")[-1]
                 for j in list_jobs(cfg):
@@ -214,6 +300,27 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
 
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path.endswith("/run") and parsed.path.startswith("/api/jobs/"):
+                slug = parsed.path.split("/")[-2]
+                length = int(self.headers.get("Content-Length") or 0)
+                try:
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                job_dir = cfg.jobs_dir / slug
+                if not job_dir.exists():
+                    return self._json({"error": f"job not found: {slug}"}, 404)
+                opts = None
+                if payload:
+                    job_json = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+                    merged = dict(job_json.get("options") or {})
+                    merged.update({k: v for k, v in payload.items() if v not in (None, "")})
+                    opts = JobOptions.from_dict(merged, job_json.get("kind", "short"))
+                    (job_dir / "options.json").write_text(json.dumps(opts.to_dict(), indent=2), encoding="utf-8")
+                    job_json["options"] = opts.to_dict()
+                    (job_dir / "job.json").write_text(json.dumps(job_json, indent=2), encoding="utf-8")
+                res = run_job_async(slug, cfg, opts)
+                return self._json(res, 200 if res.get("started") else 409)
             if parsed.path == "/api/jobs":
                 length = int(self.headers.get("Content-Length") or 0)
                 try:
@@ -226,7 +333,17 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
                     return self._json({"error": "topic is required"}, 400)
                 if kind not in ("short", "long"):
                     return self._json({"error": "kind must be short or long"}, 400)
-                job, job_dir = create_job(topic, kind, cfg)
+                opts = {k: payload.get(k) for k in
+                        ("duration_sec", "aspect", "style", "video_backend",
+                         "audio_backend", "voice_name", "captions", "caption_backend",
+                         "supervisor_backend", "language", "resolution")
+                        if payload.get(k) not in (None, "")}
+                if isinstance(opts.get("duration_sec"), str):
+                    try:
+                        opts["duration_sec"] = int(opts["duration_sec"])
+                    except ValueError:
+                        opts.pop("duration_sec")
+                job, job_dir = create_job(topic, kind, cfg, opts)
                 return self._json({"job": job.to_dict(), "path": str(job_dir)})
             return self._json({"error": "not found"}, 404)
 

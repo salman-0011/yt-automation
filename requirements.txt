@@ -4,8 +4,11 @@
 fastapi>=0.110
 uvicorn>=0.29
 python-dotenv>=1.0
+Pillow>=10.0
 
 # Optional — install only what you use. All are guarded in code:
 # faster-whisper (local CPU captions): pip install faster-whisper
 # google-genai (Gemini TTS / Charon via API): pip install google-genai
 # manim (mechanism animation, 720p): pip install manim
+# kokoro (local CPU TTS, draft voice): pip install kokoro soundfile
+# piper-tts (local CPU TTS, draft voice): pip install piper-tts

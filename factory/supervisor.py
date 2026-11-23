@@ -1,17 +1,28 @@
-"""LLM supervisor: Gemini CLI / AntiGravity CLI via subprocess.
+"""LLM supervisor: the central Project Manager.
 
-The supervisor does NOT hide the CLI. If `gemini` is installed it is
-invoked; otherwise the exact command is printed so the user can run it.
-Same for AntiGravity (`antigravity`). No API keys are read here beyond
-what the CLI itself already uses. Never hardcode a key.
+The supervisor PLANS and COORDINATES; Python does the rendering.
+Order of authority for a plan:
+  1. gemini-api  — Gemini API (GEMINI_API_KEY) writes the script + scene
+                   plan as JSON. This is the supervisor when a key is set.
+  2. gemini-cli / antigravity — CLIs review a job folder (no script write).
+  3. none — no LLM; the job's own script.md is used as-is.
+
+The supervisor never renders video/audio itself, never fakes a Flow
+call, and never overwrites a human script. See factory/auto.py for the
+runner that executes the plan step by step.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from .config import Config
+from .options import JobOptions
+from .prompts import FIVE_RULES, LONGFORM_PROMPT, SHORTS_V2_PROMPT
+from .scriptgen import generate_script_via_gemini, split_into_scenes
 
 
 def cli_available(name: str) -> str | None:
@@ -44,6 +55,38 @@ def run_supervisor_check(job_dir: Path, config: Config | None = None) -> str:
         f"  antigravity \"{prompt}\"\n"
         "Until then, run the manual pre-publish gate in prompts/checklist.md."
     )
+
+
+def plan_job(job_dir: Path, topic: str, options: JobOptions,
+             config: Config | None = None) -> dict:
+    """Central plan: supervisor writes script + scenes, runner executes.
+
+    Returns a plan dict: {script, script_source, scenes, supervisor,
+    angle}. If no LLM is available and no script exists, script is ''
+    and the caller (auto.py) stops with a clear error.
+    """
+    from .scriptgen import clean_script_text, get_or_generate_script
+    cfg = config or Config()
+    want = options.supervisor_backend
+    supervisor = "none"
+    if want in ("auto", "gemini-api") and cfg.gemini_api_key:
+        supervisor = "gemini-api"
+    elif want == "gemini-cli" and cli_available(cfg.gemini_cli):
+        supervisor = "gemini-cli"
+    elif want == "antigravity" and cli_available(cfg.antigravity_cli):
+        supervisor = "antigravity"
+
+    script, source = get_or_generate_script(job_dir, topic, options, cfg)
+    if supervisor == "gemini-api" and source == "":
+        # Gemini was the supervisor but could not write a script.
+        supervisor = "gemini-api (failed — check key / network)"
+    n_scenes = 9 if options.kind == "short" else 44
+    scenes = split_into_scenes(script, n_scenes, float(options.duration_sec),
+                               cfg.voice_wpm) if script else []
+    return {"script": script, "script_source": source, "scenes": scenes,
+            "supervisor": supervisor,
+            "angle": "The Engineer in the Story — one problem, one impossible "
+                     "constraint, one clever machine/trick, one cost."}
 
 
 def supervisor_commands(topic: str, kind: str = "short") -> str:

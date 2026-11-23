@@ -69,6 +69,11 @@ class Config:
     elevenlabs_api_key: str = os.environ.get("ELEVENLABS_API_KEY", "")
     gemini_cli: str = os.environ.get("GEMINI_CLI", "gemini")
     antigravity_cli: str = os.environ.get("ANTIGRAVITY_CLI", "antigravity")
+    # Auto-run defaults (dashboard / CLI can override per job).
+    default_video_backend: str = os.environ.get("AUTO_VIDEO_BACKEND", "auto")
+    default_audio_backend: str = os.environ.get("AUTO_AUDIO_BACKEND", "auto")
+    default_supervisor_backend: str = os.environ.get("SUPERVISOR_BACKEND", "auto")
+    gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     @property
     def jobs_dir(self) -> Path:
